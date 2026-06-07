@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 
 /**
  * Tunable parameters for the {@link RateLimiterService} token bucket.
@@ -53,7 +53,7 @@ export class RateLimiterService {
   private readonly capacity: number;
   private readonly refillIntervalMs: number;
 
-  constructor(options: RateLimiterOptions = DEFAULT_RATE_LIMITER_OPTIONS) {
+  constructor(@Optional() options: RateLimiterOptions = DEFAULT_RATE_LIMITER_OPTIONS) {
     this.capacity = Math.max(1, options.capacity);
     this.refillIntervalMs = Math.max(1, options.refillIntervalMs);
   }
