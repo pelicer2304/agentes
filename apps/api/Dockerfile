@@ -56,5 +56,6 @@ COPY --from=builder /app/apps/api/dist ./apps/api/dist
 # Expose API port
 EXPOSE 3001
 
-# Run migrations and start
-CMD ["sh", "-c", "prisma migrate deploy --schema=apps/api/prisma/schema.prisma && node apps/api/dist/main"]
+# Run migrations (non-fatal: a migrate hiccup must not crash the container, so
+# the server still starts and /health can respond) then start the app.
+CMD ["sh", "-c", "echo 'Running prisma migrate deploy...'; prisma migrate deploy --schema=apps/api/prisma/schema.prisma || echo 'WARNING: prisma migrate deploy failed; starting API anyway'; echo 'Starting API...'; node apps/api/dist/main"]

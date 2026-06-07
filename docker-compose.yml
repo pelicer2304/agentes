@@ -174,7 +174,7 @@ services:
       REDIS_URL: redis://redis:6379
     # Ports are managed by EasyPanel via Domains (api container listens on 3001).
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10

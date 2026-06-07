@@ -43,7 +43,11 @@ async function bootstrap() {
 
   app.useGlobalFilters(new HttpExceptionFilterGlobal());
 
-  await app.listen(3001);
+  // Bind explicitly to all IPv4 interfaces so the container healthcheck
+  // (wget http://127.0.0.1:3001/health) reliably reaches the server.
+  await app.listen(3001, '0.0.0.0');
+  // eslint-disable-next-line no-console
+  console.log('API listening on http://0.0.0.0:3001');
 }
 
 bootstrap().catch((error: unknown) => {
