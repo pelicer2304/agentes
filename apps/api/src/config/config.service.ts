@@ -102,6 +102,41 @@ export class AppConfigService {
       .filter((entry) => entry.length > 0);
   }
 
+  // --- Humanized reply behavior (debounce + typing) ---
+
+  /**
+   * Quiet-window (ms) for concatenating rapid successive inbound messages into
+   * a single agent turn. 0 disables buffering (reply per message).
+   */
+  get messageDebounceMs(): number {
+    const value = this.configService.get<number>('MESSAGE_DEBOUNCE_MS');
+    return typeof value === 'number' ? value : 10000;
+  }
+
+  /** Whether to send "digitando..." presence and pause before replying. */
+  get typingIndicatorEnabled(): boolean {
+    const value = this.configService.get<boolean>('TYPING_INDICATOR_ENABLED');
+    return value === undefined ? true : value;
+  }
+
+  /** Milliseconds of simulated typing per reply character. */
+  get typingMsPerChar(): number {
+    const value = this.configService.get<number>('TYPING_MS_PER_CHAR');
+    return typeof value === 'number' ? value : 45;
+  }
+
+  /** Minimum simulated typing pause (ms). */
+  get typingMinMs(): number {
+    const value = this.configService.get<number>('TYPING_MIN_MS');
+    return typeof value === 'number' ? value : 1200;
+  }
+
+  /** Maximum simulated typing pause (ms). */
+  get typingMaxMs(): number {
+    const value = this.configService.get<number>('TYPING_MAX_MS');
+    return typeof value === 'number' ? value : 6000;
+  }
+
   // --- Pricing configuration ---
 
   get pricingRangeEnabled(): boolean {

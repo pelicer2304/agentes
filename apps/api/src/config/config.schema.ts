@@ -77,6 +77,29 @@ export const configValidationSchema = Joi.object({
 
   ADMIN_WHATSAPP_NUMBERS: Joi.string().allow('').default(''), // comma-separated
 
+  // --- Humanized reply behavior (message debounce + typing indicator) ---
+  // When several messages arrive in quick succession, they are concatenated
+  // into a single turn after a quiet window, so the agent answers once like a
+  // human would. Set to 0 to disable buffering (reply per message).
+  MESSAGE_DEBOUNCE_MS: Joi.number().min(0).max(60000).default(10000).messages({
+    'number.base': 'MESSAGE_DEBOUNCE_MS must be a number of milliseconds (0 disables buffering).',
+  }),
+
+  // Whether to send the WhatsApp "digitando..." (composing) presence and pause
+  // briefly before replying, to feel like a human typing.
+  TYPING_INDICATOR_ENABLED: Joi.boolean()
+    .truthy('true')
+    .falsy('false')
+    .default(true)
+    .messages({
+      'boolean.base': 'TYPING_INDICATOR_ENABLED must be either "true" or "false".',
+    }),
+
+  // Simulated typing pause = clamp(reply.length * perChar, min, max) ms.
+  TYPING_MS_PER_CHAR: Joi.number().min(0).max(1000).default(45),
+  TYPING_MIN_MS: Joi.number().min(0).max(60000).default(1200),
+  TYPING_MAX_MS: Joi.number().min(0).max(60000).default(6000),
+
   // --- Pricing configuration ---
   PRICING_RANGE_ENABLED: Joi.boolean()
     .truthy('true')

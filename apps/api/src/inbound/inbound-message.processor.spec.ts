@@ -464,3 +464,171 @@ describe('InboundMessageProcessor - handleControlCommand', () => {
     expect(eventTypes).toContain('evolution_error');
   });
 });
+
+/**
+ * Tests for the message-debounce path (humanized replies). Successive inbound
+ * messages within the quiet window are concatenated into a SINGLE engine turn
+ * and produce ONE reply. We drive the private enqueue/flush methods directly so
+ * the test stays scoped to the buffering behavior.
+ */
+describe('InboundMessageProcessor - message debounce', () => {
+  let processor: InboundMessageProcessor;
+
+  const sendMessage = jest.fn();
+  const mockPrisma = {
+    webhookLog: { update: jest.fn().mockResolvedValue({}) },
+    message: {
+      create: jest.fn().mockResolvedValue({ id: 'm-out' }),
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue({ id: 'engine-inbound' }),
+    },
+    botEvent: { create: jest.fn().mockResolvedValue({}) },
+    conversation: {
+      findUnique: jest
+        .fn()
+        .mockResolvedValue({ botPaused: false, handoffCompleted: false }),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    lead: { update: jest.fn().mockResolvedValue({}) },
+  };
+  const mockConversationService = {
+    clearConversation: jest.fn(),
+    handleInboundMessage: jest.fn(),
+  };
+  const mockChannelRegistry = { get: jest.fn(() => ({ sendMessage })) };
+  const mockConfig = {
+    botPauseOnHandoff: false,
+    botAutoReplyEnabled: true,
+    adminWhatsappNumbers: [] as string[],
+    messageDebounceMs: 10000,
+    // Disable the typing pause so flush resolves without timer juggling.
+    typingIndicatorEnabled: false,
+    typingMsPerChar: 0,
+    typingMinMs: 0,
+    typingMaxMs: 0,
+  };
+  const mockEvolution = {
+    sendTextMessage: jest.fn(),
+    sendTypingOrPresence: jest.fn().mockResolvedValue({ ok: true }),
+  };
+
+  const inbound = (content: string, externalMessageId: string) => ({
+    channel: 'whatsapp' as const,
+    instance: 'inst-1',
+    externalMessageId,
+    from: '5511999999999',
+    to: null,
+    contactName: 'Pelicer',
+    content,
+    messageType: 'text' as const,
+    timestamp: new Date(0),
+    rawPayload: {},
+  });
+
+  const context = () => ({
+    leadId: 'lead-1',
+    conversation: { id: 'conv-1', botPaused: false, handoffCompleted: false },
+  });
+
+  const enqueue = (
+    msg: ReturnType<typeof inbound>,
+    content: string,
+  ): Promise<{ httpStatus: number; action: string }> =>
+    (processor as unknown as {
+      enqueueDebounced: (
+        w: string,
+        m: unknown,
+        c: unknown,
+        content: string,
+      ) => Promise<{ httpStatus: number; action: string }>;
+    }).enqueueDebounced('whl-1', msg, context(), content);
+
+  const flush = (conversationId: string): Promise<void> =>
+    (processor as unknown as {
+      flushDebouncedTurn: (id: string) => Promise<void>;
+    }).flushDebouncedTurn(conversationId);
+
+  beforeEach(async () => {
+    jest.useFakeTimers();
+    sendMessage.mockResolvedValue(undefined);
+    mockConversationService.handleInboundMessage.mockResolvedValue({
+      message: { id: 'out-1', content: 'Resposta única.' },
+      qualification: { shouldHandoff: false, status: 'qualificando' },
+    });
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InboundMessageProcessor,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: ConversationService, useValue: mockConversationService },
+        { provide: ChannelAdapterRegistry, useValue: mockChannelRegistry },
+        { provide: AppConfigService, useValue: mockConfig },
+        { provide: RateLimiterService, useValue: new RateLimiterService() },
+        { provide: EvolutionService, useValue: mockEvolution },
+      ],
+    }).compile();
+
+    processor = module.get(InboundMessageProcessor);
+  });
+
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+    jest.clearAllMocks();
+  });
+
+  it('concatenates rapid messages into ONE engine turn and ONE reply', async () => {
+    await enqueue(inbound('oi', 'EXT1'), 'oi');
+    await enqueue(inbound('tudo bem?', 'EXT2'), 'tudo bem?');
+    await enqueue(inbound('queria saber dos valores', 'EXT3'), 'queria saber dos valores');
+
+    // Engine not invoked yet — still within the quiet window.
+    expect(mockConversationService.handleInboundMessage).not.toHaveBeenCalled();
+
+    await flush('conv-1');
+
+    expect(mockConversationService.handleInboundMessage).toHaveBeenCalledTimes(1);
+    const [, combined] =
+      mockConversationService.handleInboundMessage.mock.calls[0];
+    expect(combined).toBe('oi\ntudo bem?\nqueria saber dos valores');
+
+    // Exactly one reply delivered.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ to: '5511999999999', conversationId: 'conv-1' }),
+    );
+  });
+
+  it('sends a "digitando" presence when a message is buffered', async () => {
+    mockConfig.typingIndicatorEnabled = true;
+    await enqueue(inbound('oi', 'EXT1'), 'oi');
+    expect(mockEvolution.sendTypingOrPresence).toHaveBeenCalledWith('5511999999999');
+    mockConfig.typingIndicatorEnabled = false;
+  });
+
+  it('deduplicates a re-delivered message (same externalMessageId) within the window', async () => {
+    await enqueue(inbound('oi', 'EXT1'), 'oi');
+    await enqueue(inbound('oi', 'EXT1'), 'oi'); // duplicate webhook
+
+    await flush('conv-1');
+
+    const [, combined] =
+      mockConversationService.handleInboundMessage.mock.calls[0];
+    expect(combined).toBe('oi');
+  });
+
+  it('drops the turn without replying when the conversation got paused mid-window', async () => {
+    mockPrisma.conversation.findUnique.mockResolvedValueOnce({
+      botPaused: true,
+      handoffCompleted: false,
+    });
+
+    await enqueue(inbound('oi', 'EXT1'), 'oi');
+    await flush('conv-1');
+
+    expect(mockConversationService.handleInboundMessage).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+    // The combined inbound is still persisted so history is not lost.
+    expect(mockPrisma.message.create).toHaveBeenCalled();
+  });
+});

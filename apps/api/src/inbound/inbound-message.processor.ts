@@ -103,6 +103,23 @@ interface ResolvedContext {
   };
 }
 
+/**
+ * A pending debounce buffer for one conversation. Holds the rapid successive
+ * inbound messages (deduped by externalMessageId) until the quiet window
+ * settles, plus the provenance of the last message (used to stamp the combined
+ * inbound row and to address the outgoing reply).
+ */
+interface BufferedTurn {
+  conversationId: string;
+  leadId: string;
+  phone: string;
+  instanceName: string | null;
+  items: Array<{ content: string; externalMessageId: string | null }>;
+  lastInbound: InboundMessage;
+  timer: NodeJS.Timeout | null;
+  firstQueuedAt: number;
+}
+
 /** Internal result of {@link invokeEngineWithTimeout}. */
 type EngineInvocation =
   | { status: 'ok'; reply: string; outboundMessageId: string; qualification: EngineQualification }
@@ -183,6 +200,17 @@ interface MessageMetrics {
 @Injectable()
 export class InboundMessageProcessor {
   private readonly logger = new Logger(InboundMessageProcessor.name);
+
+  /**
+   * In-memory debounce buffers keyed by conversationId. When several inbound
+   * messages arrive in quick succession, they are accumulated here and the
+   * quiet-window timer is reset on each new message. When the window settles,
+   * {@link flushDebouncedTurn} concatenates them into a single engine turn and
+   * produces ONE reply — so the agent answers like a human who waited for the
+   * client to finish typing. The reply is sent asynchronously (outside the
+   * webhook request) from the timer callback.
+   */
+  private readonly debounceBuffers = new Map<string, BufferedTurn>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -339,6 +367,15 @@ export class InboundMessageProcessor {
 
       // 7. Truncate content to the first MAX_CONTENT_LENGTH chars (Req 6.7/6.8).
       const content = this.truncateContent(normalized.content);
+
+      // 7b. Debounce window (humanized replies): when enabled, buffer this
+      //     message and (re)start the quiet-window timer so rapid successive
+      //     messages are concatenated into ONE engine turn. The reply is
+      //     produced asynchronously when the window settles. The webhook
+      //     returns immediately. Disabled (=0) preserves the per-message path.
+      if (this.config.messageDebounceMs > 0) {
+        return this.enqueueDebounced(webhookLogId, normalized, context, content);
+      }
 
       // 8. Invoke the frozen engine with a hard timeout (Req 9.2, 23.2).
       const invocation = await this.invokeEngineWithTimeout(
@@ -799,6 +836,9 @@ export class InboundMessageProcessor {
     let eventType: string;
 
     if (command.action === 'clear' || command.action === 'reset') {
+      // Drop any pending debounced messages for this conversation: it is about
+      // to be wiped, so buffered (not-yet-processed) messages are discarded.
+      this.cancelDebounce(context.conversation.id);
       // Full wipe + lead reset. `clearConversation` deletes prior messages and
       // analyses, resets the lead/conversation, and creates the fresh greeting
       // (persisted), returning the refreshed conversation.
@@ -914,6 +954,271 @@ export class InboundMessageProcessor {
       error: null,
     });
     return { httpStatus: 200, action: 'unsupported' };
+  }
+
+  // -------------------------------------------------------------------------
+  // Message debounce + typing indicator (humanized replies)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Buffer an inbound text message for the conversation and (re)start the quiet
+   * window. Successive messages within {@link AppConfigService.messageDebounceMs}
+   * are concatenated into a single turn (deduped by externalMessageId). A
+   * "digitando..." presence is sent immediately so the client sees the agent is
+   * reading. The webhook returns right away; the reply is produced later by
+   * {@link flushDebouncedTurn}.
+   */
+  private async enqueueDebounced(
+    webhookLogId: string,
+    inbound: InboundMessage,
+    context: ResolvedContext,
+    content: string,
+  ): Promise<ProcessOutcome> {
+    const conversationId = context.conversation.id;
+    const debounceMs = this.config.messageDebounceMs;
+    const existing = this.debounceBuffers.get(conversationId);
+
+    if (existing) {
+      const isDup =
+        inbound.externalMessageId !== null &&
+        existing.items.some(
+          (item) => item.externalMessageId === inbound.externalMessageId,
+        );
+      if (!isDup) {
+        existing.items.push({
+          content,
+          externalMessageId: inbound.externalMessageId,
+        });
+      }
+      existing.lastInbound = inbound;
+      if (existing.timer) {
+        clearTimeout(existing.timer);
+      }
+      existing.timer = setTimeout(() => {
+        void this.flushDebouncedTurn(conversationId);
+      }, debounceMs);
+    } else {
+      const buffer: BufferedTurn = {
+        conversationId,
+        leadId: context.leadId,
+        phone: inbound.from,
+        instanceName: inbound.instance,
+        items: [{ content, externalMessageId: inbound.externalMessageId }],
+        lastInbound: inbound,
+        timer: null,
+        firstQueuedAt: Date.now(),
+      };
+      buffer.timer = setTimeout(() => {
+        void this.flushDebouncedTurn(conversationId);
+      }, debounceMs);
+      this.debounceBuffers.set(conversationId, buffer);
+    }
+
+    // Show "digitando..." immediately (fire-and-forget).
+    void this.sendTypingIndicator(inbound.from);
+
+    await this.finalizeWebhookLog(webhookLogId, {
+      eventType: 'buffered',
+      instanceName: inbound.instance,
+      externalMessageId: inbound.externalMessageId,
+      phone: inbound.from,
+      processed: true,
+      error: null,
+    });
+    const count = this.debounceBuffers.get(conversationId)?.items.length ?? 1;
+    this.logger.debug(
+      `Inbound buffered for debounce (conv=${conversationId}, items=${count})`,
+    );
+    return { httpStatus: 200, action: 'replied' };
+  }
+
+  /**
+   * Cancel any pending debounce buffer for a conversation (e.g. on /clear or
+   * /reset, which wipe the conversation — buffered messages must be dropped).
+   */
+  private cancelDebounce(conversationId: string): void {
+    const buffer = this.debounceBuffers.get(conversationId);
+    if (buffer) {
+      if (buffer.timer) {
+        clearTimeout(buffer.timer);
+      }
+      this.debounceBuffers.delete(conversationId);
+    }
+  }
+
+  /**
+   * Flush a settled debounce buffer: concatenate the buffered messages into one
+   * turn, invoke the engine once, simulate typing, and deliver a single reply.
+   * Runs from a timer callback (outside the webhook request); all errors are
+   * caught so a flush failure never crashes the process.
+   *
+   * Re-gates at flush time: if the conversation became paused or
+   * handoff-completed during the window, the combined inbound is persisted but
+   * no automatic reply is sent (mirrors {@link applyGating}).
+   */
+  private async flushDebouncedTurn(conversationId: string): Promise<void> {
+    const buffer = this.debounceBuffers.get(conversationId);
+    if (!buffer) {
+      return;
+    }
+    this.debounceBuffers.delete(conversationId);
+
+    try {
+      const combined = this.truncateContent(
+        buffer.items
+          .map((item) => item.content)
+          .join('\n')
+          .trim(),
+      );
+      if (!combined) {
+        return;
+      }
+
+      // Re-gate: the conversation may have been paused / handed off mid-window.
+      const current = await this.prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { botPaused: true, handoffCompleted: true },
+      });
+      if (!this.config.botAutoReplyEnabled || current?.botPaused || current?.handoffCompleted) {
+        await this.saveCombinedInbound(buffer, combined);
+        this.logger.debug(
+          `Debounced turn dropped (gated) for conversation ${conversationId}`,
+        );
+        return;
+      }
+
+      // Invoke the frozen engine ONCE with the combined content.
+      const invocation = await this.invokeEngineWithTimeout(conversationId, combined);
+
+      // Stamp WhatsApp provenance onto the engine-created (combined) inbound row.
+      await this.backfillInboundProvenance(conversationId, buffer.lastInbound);
+      await this.recordBotEvent('message_inbound_saved', {
+        conversationId,
+        leadId: buffer.leadId,
+        payload: {
+          buffered: buffer.items.length,
+          externalMessageId: buffer.lastInbound.externalMessageId,
+        },
+      });
+
+      let reply: string;
+      let outboundMessageId: string | null = null;
+      let qualification: EngineQualification | null = null;
+      if (invocation.status === 'ok') {
+        reply = invocation.reply;
+        outboundMessageId = invocation.outboundMessageId;
+        qualification = invocation.qualification;
+      } else {
+        reply = CONTEXTUAL_FALLBACK;
+        await this.recordBotEvent('evolution_error', {
+          conversationId,
+          leadId: buffer.leadId,
+          payload: { stage: 'engine_invocation', reason: invocation.reason },
+        });
+      }
+
+      // Human-like typing pause proportional to the reply length.
+      await this.simulateTyping(buffer.phone, reply);
+
+      const sent = await this.sendReply(
+        buffer.phone,
+        reply,
+        buffer.instanceName,
+        conversationId,
+      );
+      if (!sent) {
+        await this.recordBotEvent('evolution_error', {
+          conversationId,
+          leadId: buffer.leadId,
+          payload: { phone: buffer.phone, stage: 'send_reply' },
+        });
+        return;
+      }
+
+      const flushContext: ResolvedContext = {
+        leadId: buffer.leadId,
+        conversation: {
+          id: conversationId,
+          botPaused: current?.botPaused ?? false,
+          handoffCompleted: current?.handoffCompleted ?? false,
+        },
+      };
+      await this.persistOutbound(outboundMessageId, buffer.lastInbound, reply, flushContext);
+      await this.recordBotEvent('message_outbound_sent', {
+        conversationId,
+        leadId: buffer.leadId,
+        payload: { phone: buffer.phone },
+      });
+
+      if (qualification) {
+        await this.applyHandoffSideEffects(flushContext, qualification);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Debounced flush failed for ${conversationId}: ${this.errMsg(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Persist the combined buffered content as a single inbound Message when a
+   * debounced turn is dropped by gating (so the conversation history is not
+   * lost even though no reply is produced).
+   */
+  private async saveCombinedInbound(
+    buffer: BufferedTurn,
+    combined: string,
+  ): Promise<void> {
+    try {
+      await this.prisma.message.create({
+        data: {
+          conversationId: buffer.conversationId,
+          role: 'user',
+          direction: 'inbound',
+          content: combined,
+          externalMessageId: buffer.lastInbound.externalMessageId,
+          externalChatId: buffer.lastInbound.from,
+          instanceName: buffer.lastInbound.instance,
+          messageType: buffer.lastInbound.messageType,
+          rawPayload: this.toJson(buffer.lastInbound.rawPayload),
+        },
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to persist combined inbound: ${this.errMsg(err)}`);
+    }
+  }
+
+  /**
+   * Send a single "digitando..." (composing) presence to the recipient, where
+   * Evolution_API supports it. Best-effort: failures are swallowed.
+   */
+  private async sendTypingIndicator(to: string): Promise<void> {
+    if (!this.config.typingIndicatorEnabled) {
+      return;
+    }
+    try {
+      await this.evolution.sendTypingOrPresence(to);
+    } catch (err) {
+      this.logger.debug(`Typing presence failed: ${this.errMsg(err)}`);
+    }
+  }
+
+  /**
+   * Re-assert the "digitando..." presence and pause for a human-like duration
+   * proportional to the reply length, clamped to [typingMinMs, typingMaxMs].
+   */
+  private async simulateTyping(to: string, reply: string): Promise<void> {
+    if (!this.config.typingIndicatorEnabled) {
+      return;
+    }
+    await this.sendTypingIndicator(to);
+    const ms = Math.min(
+      this.config.typingMaxMs,
+      Math.max(this.config.typingMinMs, reply.length * this.config.typingMsPerChar),
+    );
+    if (ms > 0) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    }
   }
 
   /**
