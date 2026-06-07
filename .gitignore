@@ -20,8 +20,10 @@ build/
 **/.prisma/
 **/generated/
 
-# Logs
-logs/
+# Logs (root runtime log dir only — anchored so it does NOT match
+# source folders like apps/web/src/components/logs/)
+/logs/
+apps/*/logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -44,6 +46,6 @@ Thumbs.db
 # Vite cache
 **/.vite/
 
-# Runtime state (mounted volumes in compose)
-state/
-.embeddings/
+# Runtime state (mounted volumes in compose) — anchored to repo root
+/state/
+/.embeddings/
