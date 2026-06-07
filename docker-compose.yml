@@ -58,7 +58,7 @@ services:
       SERVER_TYPE: http
       SERVER_PORT: 8080
       # Public URL of THIS Evolution service (its own EasyPanel domain).
-      SERVER_URL: ${EVOLUTION_PUBLIC_URL}
+      SERVER_URL: ${EVOLUTION_PUBLIC_URL:-http://localhost:8080}
       CORS_ORIGIN: "*"
       CORS_METHODS: "POST,GET,PUT,DELETE"
       CORS_CREDENTIALS: "true"
@@ -132,11 +132,14 @@ services:
 
       # --- Runtime environment ---
       APP_ENV: ${APP_ENV:-production}
-      FRONTEND_URL: ${FRONTEND_URL}
-      PUBLIC_API_URL: ${PUBLIC_API_URL}
+      # Defaults let the API boot even before these are set in EasyPanel.
+      # OVERRIDE in EasyPanel: FRONTEND_URL (web domain), PUBLIC_API_URL (api
+      # domain), and especially JWT_SECRET (use a strong random value).
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
 
       # --- Auth ---
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:-change-me-please-set-a-strong-jwt-secret-32+}
 
       # --- LLM provider configuration ---
       LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
@@ -169,8 +172,8 @@ services:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
       interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 60s
+      retries: 10
+      start_period: 120s
 
   web:
     build:
