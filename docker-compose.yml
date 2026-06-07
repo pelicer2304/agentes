@@ -127,8 +127,10 @@ services:
         condition: service_healthy
     # The api Dockerfile CMD runs `prisma migrate deploy` then starts the app.
     environment:
-      # --- Database (app's `decodifica` database) ---
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-decodifica}?schema=public}
+      # --- Database (app DB on the bundled postgres service) ---
+      # Built from POSTGRES_* and pinned to the `postgres` service host so a
+      # stray DATABASE_URL pointing at localhost can't break the container.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-decodifica}?schema=public
 
       # --- Runtime environment ---
       APP_ENV: ${APP_ENV:-production}
