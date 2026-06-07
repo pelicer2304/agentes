@@ -13,9 +13,12 @@ build/
 .env
 .env.*
 !.env.example
-**/.env
-**/.env.*
-!**/.env.example
+*.pem
+*.key
+
+# Prisma generated client
+**/.prisma/
+**/generated/
 
 # Logs
 logs/
@@ -24,20 +27,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Prisma generated client
-**/node_modules/.prisma/
-**/generated/
-
 # Coverage / test artifacts
 coverage/
 **/coverage/
-*.lcov
-
-# Runtime / local state
-state/
-.embeddings/
-tmp/
-*.tmp
+.nyc_output/
+*.checkpoint.log
+jest-*.log
+web-*.log
 
 # Editor / OS
 .DS_Store
@@ -48,8 +44,6 @@ Thumbs.db
 # Vite cache
 **/.vite/
 
-# Docker local volumes (if bind-mounted locally)
-postgres_data/
-redis_data/
-evolution_instances/
-evolution_store/
+# Runtime state (mounted volumes in compose)
+state/
+.embeddings/
