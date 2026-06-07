@@ -13,8 +13,29 @@ async function bootstrap() {
 
   const configService = app.get(AppConfigService);
 
+  // Normalize allowed origins: strip trailing slashes so a FRONTEND_URL like
+  // "https://app.example.com/" still matches the browser's Origin header
+  // ("https://app.example.com", which never has a trailing slash). Supports a
+  // comma-separated FRONTEND_URL for multiple allowed origins.
+  const normalizeOrigin = (value: string): string =>
+    value.trim().replace(/\/+$/, '');
+  const allowedOrigins = new Set(
+    (configService.frontendUrl ?? '')
+      .split(',')
+      .map(normalizeOrigin)
+      .filter((value) => value.length > 0),
+  );
+
   app.enableCors({
-    origin: configService.frontendUrl,
+    origin: (origin, callback) => {
+      // Allow non-browser clients (no Origin header) and any configured origin.
+      if (!origin || allowedOrigins.has(normalizeOrigin(origin))) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
+    credentials: true,
   });
 
   app.useGlobalPipes(

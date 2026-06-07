@@ -13,6 +13,12 @@ RUN npm ci --workspace=apps/web --include-workspace-root
 # Copy web source code
 COPY apps/web/ ./apps/web/
 
+# Public API URL is baked into the Vite bundle at BUILD time. Passed from
+# docker-compose (build arg) so the frontend calls the real API domain instead
+# of the localhost fallback in apps/web/src/api/client.ts.
+ARG VITE_API_URL
+ENV VITE_API_URL=${VITE_API_URL}
+
 # Build Vite application
 RUN npm run build -w apps/web
 

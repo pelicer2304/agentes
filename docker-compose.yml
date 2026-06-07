@@ -184,6 +184,10 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        # Baked into the Vite bundle at build time so the SPA calls the real
+        # public API domain. Falls back to the api EasyPanel domain default.
+        VITE_API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
     restart: unless-stopped
     depends_on:
       api:
