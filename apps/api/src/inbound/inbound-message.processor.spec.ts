@@ -297,3 +297,170 @@ describe('InboundMessageProcessor - applyHandoffSideEffects', () => {
     });
   });
 });
+
+/**
+ * Tests for {@link InboundMessageProcessor.handleControlCommand} — typed
+ * control commands (/clear, /reset, /help) received over WhatsApp. These run
+ * regardless of gating (they are invoked before {@link applyGating} in
+ * `process`), so a paused conversation can still be reset from WhatsApp.
+ */
+describe('InboundMessageProcessor - handleControlCommand', () => {
+  let processor: InboundMessageProcessor;
+
+  const sendMessage = jest.fn();
+  const mockPrisma = {
+    webhookLog: { update: jest.fn().mockResolvedValue({}) },
+    message: { create: jest.fn().mockResolvedValue({ id: 'm-out' }) },
+    botEvent: { create: jest.fn().mockResolvedValue({}) },
+  };
+  const mockConversationService = {
+    clearConversation: jest.fn(),
+    handleInboundMessage: jest.fn(),
+  };
+  const mockChannelRegistry = { get: jest.fn(() => ({ sendMessage })) };
+  const mockConfig = { botPauseOnHandoff: false, adminWhatsappNumbers: [] as string[] };
+  const mockEvolution = { sendTextMessage: jest.fn() };
+
+  const inbound = (content: string) => ({
+    channel: 'whatsapp' as const,
+    instance: 'inst-1',
+    externalMessageId: 'EXT1',
+    from: '5511999999999',
+    to: null,
+    contactName: 'Pelicer',
+    content,
+    messageType: 'text' as const,
+    timestamp: new Date(0),
+    rawPayload: {},
+  });
+
+  const context = () => ({
+    leadId: 'lead-1',
+    conversation: { id: 'conv-1', botPaused: true, handoffCompleted: false },
+  });
+
+  const invoke = (
+    webhookLogId: string,
+    msg: unknown,
+    ctx: unknown,
+    command: unknown,
+  ): Promise<{ httpStatus: number; action: string }> =>
+    (processor as unknown as {
+      handleControlCommand: (
+        w: string,
+        m: unknown,
+        c: unknown,
+        cmd: unknown,
+      ) => Promise<{ httpStatus: number; action: string }>;
+    }).handleControlCommand(webhookLogId, msg, ctx, command);
+
+  beforeEach(async () => {
+    sendMessage.mockResolvedValue(undefined);
+    mockConversationService.clearConversation.mockResolvedValue({
+      messages: [
+        { content: 'Olá. Sou o DecodificaIA, atendente inteligente da Decodifica.' },
+      ],
+    });
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InboundMessageProcessor,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: ConversationService, useValue: mockConversationService },
+        { provide: ChannelAdapterRegistry, useValue: mockChannelRegistry },
+        { provide: AppConfigService, useValue: mockConfig },
+        { provide: RateLimiterService, useValue: new RateLimiterService() },
+        { provide: EvolutionService, useValue: mockEvolution },
+      ],
+    }).compile();
+
+    processor = module.get(InboundMessageProcessor);
+  });
+
+  afterEach(() => jest.clearAllMocks());
+
+  it('/clear wipes the conversation and sends the fresh greeting (bypasses gating, no engine call)', async () => {
+    const ctx = context();
+    const result = await invoke('whl-1', inbound('/clear'), ctx, {
+      isCommand: true,
+      name: 'clear',
+      confirmationReply: 'Pronto, limpei o histórico.',
+      action: 'clear',
+    });
+
+    expect(mockConversationService.clearConversation).toHaveBeenCalledWith('conv-1');
+    // The frozen engine is never invoked for a command.
+    expect(mockConversationService.handleInboundMessage).not.toHaveBeenCalled();
+    // The fresh greeting (already persisted by clearConversation) is delivered.
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: '5511999999999',
+        content: 'Olá. Sou o DecodificaIA, atendente inteligente da Decodifica.',
+        conversationId: 'conv-1',
+      }),
+    );
+    expect(mockPrisma.webhookLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'whl-1' },
+        data: expect.objectContaining({ eventType: 'command:clear' }),
+      }),
+    );
+    expect(result).toEqual({ httpStatus: 200, action: 'replied' });
+  });
+
+  it('/reset also maps to clearConversation (same WhatsApp conversation reused)', async () => {
+    const ctx = context();
+    await invoke('whl-2', inbound('/reset'), ctx, {
+      isCommand: true,
+      name: 'reset',
+      confirmationReply: 'Pronto, reiniciei nossa conversa.',
+      action: 'reset',
+    });
+
+    expect(mockConversationService.clearConversation).toHaveBeenCalledWith('conv-1');
+    expect(mockPrisma.webhookLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ eventType: 'command:reset' }),
+      }),
+    );
+  });
+
+  it('/help lists commands without resetting any state', async () => {
+    const ctx = context();
+    await invoke('whl-3', inbound('/help'), ctx, {
+      isCommand: true,
+      name: 'help',
+      confirmationReply: 'Esses são os comandos que eu reconheço: /clear /reset /help',
+      action: 'none',
+    });
+
+    expect(mockConversationService.clearConversation).not.toHaveBeenCalled();
+    // Inbound saved + outbound persisted (two message.create calls).
+    expect(mockPrisma.message.create).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('comandos'),
+      }),
+    );
+  });
+
+  it('tolerates a send failure on /clear and still returns 200', async () => {
+    sendMessage.mockRejectedValueOnce(new Error('evolution down'));
+    const ctx = context();
+
+    const result = await invoke('whl-4', inbound('/clear'), ctx, {
+      isCommand: true,
+      name: 'clear',
+      confirmationReply: 'Pronto, limpei o histórico.',
+      action: 'clear',
+    });
+
+    // State change still applied; webhook still 200.
+    expect(mockConversationService.clearConversation).toHaveBeenCalledWith('conv-1');
+    expect(result).toEqual({ httpStatus: 200, action: 'replied' });
+    const eventTypes = mockPrisma.botEvent.create.mock.calls.map(
+      (call) => call[0].data.type,
+    );
+    expect(eventTypes).toContain('evolution_error');
+  });
+});

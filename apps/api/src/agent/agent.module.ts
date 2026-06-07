@@ -5,9 +5,10 @@ import { AgentService } from './agent.service';
 import { AgentReplyService } from './agent-reply.service';
 import { AgentAnalysisService } from './agent-analysis.service';
 import { FactExtractorService } from './fact-extractor.service';
+import { ContextTrackerService } from './context-tracker';
+import { HandoffManagerService } from './handoff-manager';
 import { PromptBuilderService } from './prompt-builder.service';
 import { ResponseParserService } from './response-parser.service';
-import { NormalizeOutputService } from './normalize-output.service';
 import { ResponseGuardService } from './response-guard.service';
 
 @Module({
@@ -17,11 +18,20 @@ import { ResponseGuardService } from './response-guard.service';
     AgentReplyService,
     AgentAnalysisService,
     FactExtractorService,
+    ContextTrackerService,
+    HandoffManagerService,
     PromptBuilderService,
     ResponseParserService,
-    NormalizeOutputService,
     ResponseGuardService,
   ],
-  exports: [AgentService, AgentReplyService, AgentAnalysisService, FactExtractorService, ResponseGuardService],
+  exports: [
+    AgentService,
+    AgentReplyService,
+    AgentAnalysisService,
+    FactExtractorService,
+    ContextTrackerService,
+    HandoffManagerService,
+    ResponseGuardService,
+  ],
 })
 export class AgentModule {}

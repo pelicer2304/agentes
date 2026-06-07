@@ -1,36 +1,14 @@
 import { Injectable } from '@nestjs/common';
+import {
+  GuardInput,
+  GuardOutput,
+  HandoffState,
+} from './conversation-types';
 
-/**
- * Input contract for the ResponseGuardService.
- * Contains the generated reply plus conversation context needed for rule evaluation.
- */
-export interface GuardInput {
-  reply: string;
-  userMessage: string;
-  segment: string | null;
-  mainPain: string | null;
-  volume: string | null;
-  handoffOffered: boolean;
-  handoffAccepted: boolean;
-  handoffCompleted: boolean;
-  priceAskedCount: number;
-  pricingRangeEnabled: boolean;
-  startingPrice: string | null;
-  conversationHistory: Array<{
-    role: 'user' | 'assistant';
-    content: string;
-  }>;
-}
-
-/**
- * Output contract for the ResponseGuardService.
- * Contains the (potentially modified) reply, change flag, and reason.
- */
-export interface GuardOutput {
-  reply: string;
-  changed: boolean;
-  guardReason: string | null;
-}
+// Re-export the consolidated contract so existing importers of these symbols
+// from this module keep compiling. The authoritative definitions live in
+// `conversation-types.ts`.
+export { GuardInput, GuardOutput } from './conversation-types';
 
 /**
  * Internal interface for guard rules.
@@ -42,6 +20,36 @@ export interface GuardRule {
   type: 'full-replace' | 'partial-transform' | 'metadata-only';
   applies(input: GuardInput, currentReply: string): boolean;
   apply(input: GuardInput, currentReply: string): string;
+}
+
+// ─── Contract accessors ──────────────────────────────────────────────────────
+// The consolidated GuardInput nests facts/handoff/said under `context` and
+// pricing under `pricing`. These helpers read the flat values the rules need
+// from the new shape so rule bodies stay readable.
+
+function segmentOf(input: GuardInput): string | null {
+  return input.context.facts.segment ?? null;
+}
+
+function pricingEnabledOf(input: GuardInput): boolean {
+  return input.pricing.pricingRangeEnabled;
+}
+
+function startingPriceOf(input: GuardInput): string | null {
+  return input.pricing.startingPriceText ?? null;
+}
+
+function handoffAcceptedOf(input: GuardInput): boolean {
+  const state: HandoffState = input.context.handoffState;
+  return state === 'accepted' || state === 'completed';
+}
+
+function handoffCompletedOf(input: GuardInput): boolean {
+  return input.context.handoffState === 'completed';
+}
+
+function priorAssistantRepliesOf(input: GuardInput): string[] {
+  return input.context.said.priorAssistantReplies ?? [];
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -139,6 +147,77 @@ const IA_EXPLANATION_SHORT_ALTERNATIVE =
 
 const HANDOFF_COMPLETED_RESPONSE =
   'Seu atendimento já foi encaminhado para a equipe da Decodifica com o resumo do cenário.';
+
+// Leading filler words removed for a humanized tone (migrated from
+// NormalizeOutputService.applyToneCleanup).
+const FILLER_STARTS: string[] = [
+  'entendo.',
+  'entendo,',
+  'perfeito.',
+  'perfeito,',
+  'ótimo.',
+  'ótimo,',
+  'compreendo.',
+  'compreendo,',
+  'claro.',
+  'claro,',
+  'show.',
+  'show,',
+  'ok.',
+  'ok,',
+  'certo.',
+  'certo,',
+  'legal.',
+  'legal,',
+];
+
+// Internal state labels, stage names, and field identifiers that must never
+// leak into a user-facing reply (R8.3).
+const INTERNAL_LABELS: string[] = [
+  'handoff_humano',
+  'chamar_humano',
+  'qualificando',
+  'descoberta',
+  'handoffOffered',
+  'handoffAccepted',
+  'handoffCompleted',
+  'handoffRequired',
+  'leadScore',
+  'mainPain',
+  'secondaryPains',
+  'knownPains',
+  'whatsappUsage',
+  'estimatedVolume',
+  'decisionRole',
+  'businessDescription',
+  'priceAskedCount',
+];
+
+// Phrases indicating the agent is offering a demonstration or simulation.
+const DEMO_OFFER_KEYWORDS: string[] = [
+  'demonstração',
+  'demonstracao',
+  'demonstrar',
+  'simulação',
+  'simulacao',
+  'simular',
+  'fazer uma demo',
+  'uma demo',
+];
+
+// Phrases indicating the user is requesting a demonstration/simulation.
+const DEMO_REQUEST_KEYWORDS: string[] = [
+  'demonstração',
+  'demonstracao',
+  'demonstrar',
+  'simulação',
+  'simulacao',
+  'simular',
+  'quero ver',
+  'quero uma demo',
+  'me mostra',
+  'pode mostrar',
+];
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
@@ -242,20 +321,46 @@ function getSegmentTemplate(segment: string | null): string {
 
 function containsHandoffOffer(reply: string): boolean {
   const lower = reply.toLowerCase();
-  return (
-    lower.includes('encaminhar?') ||
-    lower.includes('encaminhe?')
-  );
+  return lower.includes('encaminhar?') || lower.includes('encaminhe?');
 }
 
-function historyContainsIAExplanation(
-  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>,
-): boolean {
-  return conversationHistory.some(
-    (msg) =>
-      msg.role === 'assistant' &&
-      msg.content.toLowerCase().includes(IA_EXPLANATION_PHRASE.toLowerCase()),
-  );
+/**
+ * Normalize a reply for repetition comparison: lowercase, strip diacritics and
+ * punctuation/symbols, collapse whitespace. This matches the normalization the
+ * ContextTracker applies when building `said.priorAssistantReplies`, so the
+ * comparison is consistent and idempotent on already-normalized prior replies.
+ */
+function normalizeForRepetition(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // strip diacritics
+    .replace(/[^a-z0-9\s]/g, ' ') // strip punctuation/symbols
+    .replace(/\s+/g, ' ') // collapse whitespace
+    .trim();
+}
+
+/**
+ * Split text into sentences, preserving each sentence's trailing punctuation
+ * and the spacing between them so a join('') reconstructs the original text.
+ */
+function splitSentences(text: string): string[] {
+  const matches = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
+  return matches && matches.length > 0 ? matches : [text];
+}
+
+function isQuestionSentence(sentence: string): boolean {
+  return sentence.includes('?');
+}
+
+function offersDemo(reply: string): boolean {
+  const lower = reply.toLowerCase();
+  return DEMO_OFFER_KEYWORDS.some((k) => lower.includes(k));
+}
+
+function userRequestedDemo(userMessage: string): boolean {
+  const lower = userMessage.toLowerCase();
+  return DEMO_REQUEST_KEYWORDS.some((k) => lower.includes(k));
 }
 
 // ─── Rule Definitions ────────────────────────────────────────────────────────
@@ -265,7 +370,9 @@ const rule2HandoffCompleted: GuardRule = {
   priority: 1,
   type: 'full-replace',
   applies(input: GuardInput): boolean {
-    return input.handoffCompleted && matchesAcceptancePhrase(input.userMessage);
+    return (
+      handoffCompletedOf(input) && matchesAcceptancePhrase(input.userMessage)
+    );
   },
   apply(): string {
     return HANDOFF_COMPLETED_RESPONSE;
@@ -280,7 +387,7 @@ const rule4FrustratedPrice: GuardRule = {
     return matchesFrustrationPhrase(input.userMessage);
   },
   apply(input: GuardInput): string {
-    return getSafePriceResponse(input.pricingRangeEnabled, input.startingPrice);
+    return getSafePriceResponse(pricingEnabledOf(input), startingPriceOf(input));
   },
 };
 
@@ -288,11 +395,11 @@ const rule1IsolatedHandoff: GuardRule = {
   name: 'isolated_handoff_replaced',
   priority: 3,
   type: 'full-replace',
-  applies(input: GuardInput, currentReply: string): boolean {
+  applies(_input: GuardInput, currentReply: string): boolean {
     return isIsolatedHandoff(currentReply);
   },
   apply(input: GuardInput): string {
-    return getSegmentTemplate(input.segment);
+    return getSegmentTemplate(segmentOf(input));
   },
 };
 
@@ -307,13 +414,48 @@ const rule3PriceResponseFix: GuardRule = {
     );
   },
   apply(input: GuardInput): string {
-    return getSafePriceResponse(input.pricingRangeEnabled, input.startingPrice);
+    return getSafePriceResponse(pricingEnabledOf(input), startingPriceOf(input));
+  },
+};
+
+/**
+ * Repetition guard (R6.1, R6.2): if the candidate reply is a Repetition of a
+ * prior assistant reply, replace it with the answer to a pending price
+ * question, or otherwise advance to a different conversational step.
+ */
+const ruleRepetition: GuardRule = {
+  name: 'repetition_replaced',
+  priority: 5,
+  type: 'full-replace',
+  applies(input: GuardInput, currentReply: string): boolean {
+    const normalized = normalizeForRepetition(currentReply);
+    if (!normalized) return false;
+    return priorAssistantRepliesOf(input).some(
+      (prior) => normalizeForRepetition(prior) === normalized,
+    );
+  },
+  apply(input: GuardInput, currentReply: string): string {
+    // Prefer answering a pending price question over re-advancing.
+    if (input.intent === 'price_question') {
+      return getSafePriceResponse(
+        pricingEnabledOf(input),
+        startingPriceOf(input),
+      );
+    }
+    const advance = getSegmentTemplate(segmentOf(input));
+    // If even the advance would repeat, fall back to the generic template.
+    if (
+      normalizeForRepetition(advance) === normalizeForRepetition(currentReply)
+    ) {
+      return SEGMENT_TEMPLATES.fallback;
+    }
+    return advance;
   },
 };
 
 const rule5BrokenPhrases: GuardRule = {
   name: 'broken_phrases_fixed',
-  priority: 5,
+  priority: 6,
   type: 'partial-transform',
   applies(_input: GuardInput, currentReply: string): boolean {
     const safePriceNoRange = getSafePriceResponse(false, null);
@@ -343,13 +485,10 @@ const rule5BrokenPhrases: GuardRule = {
     result = result.replace(/falta de organizam/g, 'falta de organização');
 
     const safePriceResponse = getSafePriceResponse(
-      input.pricingRangeEnabled,
-      input.startingPrice,
+      pricingEnabledOf(input),
+      startingPriceOf(input),
     );
-    result = result.replace(
-      /Não trabalho com valores\./g,
-      safePriceResponse,
-    );
+    result = result.replace(/Não trabalho com valores\./g, safePriceResponse);
     result = result.replace(
       /Não trabalho com faixas de preço\./g,
       safePriceResponse,
@@ -376,48 +515,137 @@ const rule5BrokenPhrases: GuardRule = {
   },
 };
 
+/**
+ * Sanitization (R8.3): strip internal field values, internal state labels, and
+ * system identifiers from the reply (migrated from
+ * NormalizeOutputService.applySanitization, extended with internal-label
+ * stripping).
+ */
+const ruleSanitization: GuardRule = {
+  name: 'sanitized',
+  priority: 7,
+  type: 'partial-transform',
+  applies(_input: GuardInput, currentReply: string): boolean {
+    const leakPatterns = [
+      /Pelo que você descreveu sobre\s+[a-z]{2,15}\.\.\./gi,
+      /com\s+[A-Z][a-záéíóú]+\s+d[aoe]\s+[a-záéíóú]+\.\.\./g,
+      /erros são raros/gi,
+    ];
+    if (leakPatterns.some((p) => p.test(currentReply))) return true;
+
+    const labelPattern = new RegExp(
+      `\\b(${INTERNAL_LABELS.join('|')})\\b`,
+      'i',
+    );
+    if (labelPattern.test(currentReply)) return true;
+
+    return currentReply.startsWith('Olá!') || /\s{2,}/.test(currentReply);
+  },
+  apply(_input: GuardInput, currentReply: string): string {
+    let reply = currentReply;
+
+    // Remove patterns that look like raw field values leaking into the reply.
+    reply = reply.replace(
+      /Pelo que você descreveu sobre\s+[a-z]{2,15}\.\.\./gi,
+      '',
+    );
+    reply = reply.replace(
+      /com\s+[A-Z][a-záéíóú]+\s+d[aoe]\s+[a-záéíóú]+\.\.\./g,
+      '',
+    );
+
+    // Replace "erros são raros" with proper phrasing.
+    reply = reply.replace(
+      /erros são raros/gi,
+      'a IA reduz erros quando tem regras, base de conhecimento e limites claros',
+    );
+
+    // Strip internal state labels / field identifiers.
+    const labelPattern = new RegExp(
+      `\\b(${INTERNAL_LABELS.join('|')})\\b`,
+      'gi',
+    );
+    reply = reply.replace(labelPattern, '');
+
+    // Fix exclamation at start (Olá! -> Olá.)
+    if (reply.startsWith('Olá!')) {
+      reply = 'Olá.' + reply.slice(4);
+    }
+
+    // Clean up orphaned punctuation/spacing left by removals.
+    reply = reply.replace(/\s+([,.;:?!])/g, '$1');
+    reply = reply.replace(/\s{2,}/g, ' ').trim();
+
+    return reply;
+  },
+};
+
+/**
+ * Demo/simulation re-offer guard (R6.3, R6.4): once a demonstration or
+ * simulation has been offered, do not offer it again unless the user asked.
+ * Strips the offending sentence(s); if nothing meaningful remains, advances to
+ * a different next step.
+ */
+const ruleDemoReoffer: GuardRule = {
+  name: 'demo_reoffer_removed',
+  priority: 8,
+  type: 'partial-transform',
+  applies(input: GuardInput, currentReply: string): boolean {
+    return (
+      input.context.said.offeredDemo &&
+      offersDemo(currentReply) &&
+      !userRequestedDemo(input.userMessage)
+    );
+  },
+  apply(input: GuardInput, currentReply: string): string {
+    const kept = splitSentences(currentReply).filter(
+      (sentence) => !offersDemo(sentence),
+    );
+    const result = kept.join('').replace(/\s{2,}/g, ' ').trim();
+    if (!result) {
+      return getSegmentTemplate(segmentOf(input));
+    }
+    return result;
+  },
+};
+
 const rule6IAExplanation: GuardRule = {
   name: 'ia_explanation_deduplicated',
-  priority: 6,
+  priority: 9,
   type: 'partial-transform',
   applies(input: GuardInput, currentReply: string): boolean {
     return (
       currentReply
         .toLowerCase()
         .includes(IA_EXPLANATION_PHRASE.toLowerCase()) &&
-      historyContainsIAExplanation(input.conversationHistory)
+      input.context.said.explainedAiBehavior
     );
   },
   apply(_input: GuardInput, currentReply: string): string {
     // Case-insensitive replacement of the IA explanation phrase and the rest of
     // the sentence (up to the next period) with the short alternative.
-    // We find the phrase occurrence and replace the full sentence containing it.
     const lowerReply = currentReply.toLowerCase();
     const lowerPhrase = IA_EXPLANATION_PHRASE.toLowerCase();
     const idx = lowerReply.indexOf(lowerPhrase);
 
     if (idx === -1) return currentReply;
 
-    // Find the full sentence containing the phrase
-    // Look backward for sentence start
+    // Find the full sentence containing the phrase.
     let sentenceStart = idx;
     while (sentenceStart > 0 && currentReply[sentenceStart - 1] !== '.') {
       sentenceStart--;
     }
-    // Trim leading spaces
-    while (
-      sentenceStart < idx &&
-      currentReply[sentenceStart] === ' '
-    ) {
+    while (sentenceStart < idx && currentReply[sentenceStart] === ' ') {
       sentenceStart++;
     }
 
-    // Look forward for sentence end (period after the phrase)
     let sentenceEnd = idx + IA_EXPLANATION_PHRASE.length;
-    while (sentenceEnd < currentReply.length && currentReply[sentenceEnd] !== '.') {
+    while (
+      sentenceEnd < currentReply.length &&
+      currentReply[sentenceEnd] !== '.'
+    ) {
       sentenceEnd++;
     }
-    // Include the period if found
     if (sentenceEnd < currentReply.length) {
       sentenceEnd++;
     }
@@ -429,12 +657,107 @@ const rule6IAExplanation: GuardRule = {
   },
 };
 
+/**
+ * Answer-before-follow-up ordering (R1.4): when a reply contains both an answer
+ * clause and a follow-up question that are out of order, reorder so every
+ * answer sentence precedes every question sentence (stable within each group).
+ */
+const ruleAnswerBeforeFollowup: GuardRule = {
+  name: 'answer_before_followup',
+  priority: 10,
+  type: 'partial-transform',
+  applies(_input: GuardInput, currentReply: string): boolean {
+    const sentences = splitSentences(currentReply);
+    let seenQuestion = false;
+    for (const sentence of sentences) {
+      if (isQuestionSentence(sentence)) {
+        seenQuestion = true;
+      } else if (seenQuestion && sentence.trim().length > 0) {
+        // A non-question (answer) sentence appears after a question.
+        return true;
+      }
+    }
+    return false;
+  },
+  apply(_input: GuardInput, currentReply: string): string {
+    const sentences = splitSentences(currentReply);
+    const answers = sentences.filter((s) => !isQuestionSentence(s));
+    const questions = sentences.filter((s) => isQuestionSentence(s));
+    return [...answers, ...questions]
+      .join(' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  },
+};
+
+/**
+ * Single-question shaping (R8.2): a reply contains at most one question.
+ * Keep all answer sentences and the first question sentence; drop any
+ * subsequent question sentences.
+ */
+const ruleSingleQuestion: GuardRule = {
+  name: 'single_question',
+  priority: 11,
+  type: 'partial-transform',
+  applies(_input: GuardInput, currentReply: string): boolean {
+    return (currentReply.match(/\?/g) || []).length > 1;
+  },
+  apply(_input: GuardInput, currentReply: string): string {
+    const sentences = splitSentences(currentReply);
+    let keptQuestion = false;
+    const result: string[] = [];
+    for (const sentence of sentences) {
+      if (isQuestionSentence(sentence)) {
+        if (keptQuestion) continue; // drop additional questions
+        keptQuestion = true;
+      }
+      result.push(sentence);
+    }
+    return result.join('').replace(/\s{2,}/g, ' ').trim();
+  },
+};
+
+/**
+ * Tone cleanup (R8.1): remove leading fillers and replace "!" with "."
+ * (migrated from NormalizeOutputService.applyToneCleanup).
+ */
+const ruleToneCleanup: GuardRule = {
+  name: 'tone_cleanup',
+  priority: 12,
+  type: 'partial-transform',
+  applies(_input: GuardInput, currentReply: string): boolean {
+    const lower = currentReply.toLowerCase().trimStart();
+    return (
+      FILLER_STARTS.some((filler) => lower.startsWith(filler)) ||
+      currentReply.includes('!')
+    );
+  },
+  apply(_input: GuardInput, currentReply: string): string {
+    let reply = currentReply;
+    const lower = reply.toLowerCase().trimStart();
+
+    for (const filler of FILLER_STARTS) {
+      if (lower.startsWith(filler)) {
+        reply = reply.trimStart().slice(filler.length).trimStart();
+        if (reply.length > 0) {
+          reply = reply.charAt(0).toUpperCase() + reply.slice(1);
+        }
+        break;
+      }
+    }
+
+    reply = reply.replace(/!/g, '.');
+
+    return reply;
+  },
+};
+
 const rule7BlockPrematureHandoff: GuardRule = {
   name: 'handoff_offered_not_accepted',
-  priority: 7,
+  priority: 13,
   type: 'metadata-only',
   applies(input: GuardInput, currentReply: string): boolean {
-    return containsHandoffOffer(currentReply) && !input.handoffAccepted;
+    return containsHandoffOffer(currentReply) && !handoffAcceptedOf(input);
   },
   apply(_input: GuardInput, currentReply: string): string {
     // metadata-only: do not modify the reply
@@ -448,6 +771,11 @@ const rule7BlockPrematureHandoff: GuardRule = {
  * Deterministic post-processing guard that applies prioritized text
  * transformation rules to agent replies before persistence/delivery.
  *
+ * This is the single post-processing stage for every reply (local, price, LLM,
+ * fallback). It absorbs the tone/sanitization rules previously stranded in
+ * NormalizeOutputService and adds repetition handling, single-question shaping,
+ * answer-before-follow-up ordering, and internal-label stripping.
+ *
  * Pure function — no LLM calls, no database access, no side effects.
  */
 @Injectable()
@@ -457,8 +785,14 @@ export class ResponseGuardService {
     rule4FrustratedPrice,
     rule1IsolatedHandoff,
     rule3PriceResponseFix,
+    ruleRepetition,
     rule5BrokenPhrases,
+    ruleSanitization,
+    ruleDemoReoffer,
     rule6IAExplanation,
+    ruleAnswerBeforeFollowup,
+    ruleSingleQuestion,
+    ruleToneCleanup,
     rule7BlockPrematureHandoff,
   ];
 
@@ -471,7 +805,7 @@ export class ResponseGuardService {
     for (const rule of this.rules) {
       try {
         if (rule.type === 'full-replace') {
-          // Skip full-replace rules if one already fired
+          // Skip full-replace rules if one already fired (mutually exclusive)
           if (fullReplaceApplied) continue;
 
           if (rule.applies(input, currentReply)) {

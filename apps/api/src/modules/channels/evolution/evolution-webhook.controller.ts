@@ -97,7 +97,9 @@ export class EvolutionWebhookController {
     // 1. Secret validation FIRST — never touch the payload on failure (5.2/5.3).
     this.validateSecret(headers);
 
-    // 2. JSON / required-field validation — 400 without processing (5.6).
+    // 2. JSON validation — 400 only for a non-object body. Non-message events
+    //    (no/array `data`) are accepted and ignored with 200 by the processor,
+    //    so Evolution never treats a routine event as a non-recoverable 4xx.
     this.validateBody(body);
 
     // 3. Delegate to the processor. Unhandled errors propagate to a 500 (5.7).
@@ -175,14 +177,22 @@ export class EvolutionWebhookController {
   }
 
   /**
-   * Validate that the body is a non-empty JSON object carrying the minimum
-   * fields required to identify an event (Requirement 5.6). Throws
-   * {@link BadRequestException} (HTTP 400) otherwise, without processing.
+   * Validate only that the body is a JSON object — the minimum needed for the
+   * processor to inspect it. Throws {@link BadRequestException} (HTTP 400) for a
+   * null/undefined body or a non-object (e.g. an array or primitive), without
+   * processing.
    *
-   * The minimum identifying shape mirrors what the normalizer needs to even
-   * begin: a `data` object (the event envelope). Deeper field-level filtering
-   * (fromMe/group/malformed content) is the processor/normalizer's job and
-   * yields 200, not 400.
+   * IMPORTANT — why we do NOT reject object bodies that lack a `data` envelope:
+   * Evolution_API delivers many event types to this single webhook URL
+   * (`messages.upsert`, but also `messages.update`/delivery acks,
+   * `presence.update`, `contacts.update`, `chats.update`, …). Several of those
+   * carry `data` as an array or omit it entirely. Returning a client error for
+   * them is harmful: Evolution treats a 4xx as a non-recoverable delivery and
+   * cancels retries (the response is mapped to 422 by the global exception
+   * filter). So any well-formed JSON object is accepted here and handed to the
+   * processor, whose normalizer classifies non-message events and returns HTTP
+   * 200 (`ignored`). Only a body that is not a JSON object at all is a true
+   * transport-level error and still yields 400.
    */
   private validateBody(body: unknown): asserts body is Record<string, unknown> {
     if (body === null || body === undefined) {
@@ -191,16 +201,8 @@ export class EvolutionWebhookController {
     if (typeof body !== 'object' || Array.isArray(body)) {
       throw new BadRequestException('Webhook body must be a JSON object');
     }
-    const record = body as Record<string, unknown>;
-    if (Object.keys(record).length === 0) {
-      throw new BadRequestException('Webhook body is empty');
-    }
-    // Required to identify an event: the Evolution event envelope `data` object.
-    const data = record['data'];
-    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException(
-        'Webhook body is missing the required "data" event envelope',
-      );
-    }
+    // No `data`-envelope requirement: non-message Evolution events (which may
+    // omit `data` or send it as an array) are accepted and ignored with 200 by
+    // the processor/normalizer, so Evolution does not cancel future deliveries.
   }
 }

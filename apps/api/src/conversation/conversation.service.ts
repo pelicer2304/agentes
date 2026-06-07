@@ -1,17 +1,27 @@
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentReplyService } from '../agent/agent-reply.service';
 import { AgentAnalysisService } from '../agent/agent-analysis.service';
-import { FactExtractorService, KnownFacts } from '../agent/fact-extractor.service';
+import { ContextTrackerService } from '../agent/context-tracker';
+import { HandoffManagerService } from '../agent/handoff-manager';
 import { ResponseGuardService, GuardInput } from '../agent/response-guard.service';
 import { PricingConfigService } from '../inbound/pricing-config.service';
-import { calculateScore } from '../agent/score-calculator';
+import { resolveCommand, availableCommandsReply } from '../agent/command-handler';
+import { classifyEdgeInput, edgeReply } from '../agent/edge-input';
+import { resolveIntent } from '../agent/intent-resolver';
+import { detectPreference } from '../agent/preference-detector';
+import { composePriceAnswer } from '../agent/price-answer';
+import {
+  calculateScore,
+  clampNonDecreasing,
+  clampScore,
+  temperatureFor,
+} from '../agent/score-calculator';
+import {
+  ConversationContext,
+  IntentCategory,
+} from '../agent/conversation-types';
 import {
   AgentSettingsInput,
   ConversationMessage,
@@ -22,6 +32,27 @@ const DEFAULT_INITIAL_MESSAGE =
 
 const DEFAULT_AGENT_NAME = 'DecodificaIA';
 
+// ─── Deterministic canned replies (bypass the LLM) ──────────────────────────
+// Sourced from the legacy local-rule strings so observable behavior for these
+// intents is preserved while the routing moves into the linear pipeline.
+
+const REPLY_PREFERENCE_CONTINUE =
+  'Combinado, seguimos por aqui mesmo. Me conta o que você gostaria de entender ou resolver agora?';
+
+const REPLY_HANDOFF_ACCEPT =
+  'Vou encaminhar para a equipe da Decodifica com um resumo do seu cenário. Assim alguém consegue avaliar o melhor caminho e te retornar com mais precisão.';
+
+const REPLY_HANDOFF_COMPLETED_ACK =
+  'Seu atendimento já foi encaminhado para a equipe da Decodifica com o resumo do cenário.';
+
+const REPLY_DESISTANCE =
+  'Sem problema. Se o WhatsApp estiver gerando perda de venda ou exigindo respostas repetidas, vale uma análise depois. Estou por aqui se precisar.';
+
+const REPLY_FRUSTRATION =
+  'Entendi. Vou encaminhar seu caso para a equipe te passar uma proposta direta, sem mais perguntas.';
+
+const REPLY_ACKNOWLEDGMENT = 'Tô por aqui se precisar de mais alguma coisa.';
+
 @Injectable()
 export class ConversationService {
   private readonly logger = new Logger(ConversationService.name);
@@ -30,7 +61,8 @@ export class ConversationService {
     private readonly prisma: PrismaService,
     private readonly agentReply: AgentReplyService,
     private readonly agentAnalysis: AgentAnalysisService,
-    private readonly factExtractor: FactExtractorService,
+    private readonly contextTracker: ContextTrackerService,
+    private readonly handoffManager: HandoffManagerService,
     private readonly responseGuard: ResponseGuardService,
     private readonly pricingConfig: PricingConfigService,
   ) {}
@@ -91,18 +123,22 @@ export class ConversationService {
   }
 
   /**
-   * Handles an inbound user message with LINEAR flow:
-   * facts → score → intent → reply → validate → save
+   * Handles an inbound user message through the LINEAR, deterministic pipeline:
+   *
+   *   over-length rejection → command resolution → edge handling →
+   *   context extraction → intent resolution → deterministic answers
+   *   (price, preference, handoff accept/complete, greeting, ack, desistance) →
+   *   LLM composition → contextual fallback → response guard →
+   *   handoff state + score resolution → persist message/lead/conversation →
+   *   fire async analysis → return { message, qualification }
+   *
+   * Commands, edge inputs, and over-length messages never reach the LLM and
+   * never mutate facts/lead beyond storing the raw inbound message.
    */
   async handleInboundMessage(conversationId: string, content: string) {
-    // 1. Validate
-    if (!content || content.length < 1 || content.length > 4000) {
-      throw new BadRequestException(
-        'Message content must be between 1 and 4000 characters',
-      );
-    }
+    const rawContent = content ?? '';
 
-    // 2. Verify conversation exists
+    // 0. Verify conversation exists (needed for every downstream stage).
     const conversation = await this.prisma.conversation.findUnique({
       where: { id: conversationId },
       include: { lead: true },
@@ -114,22 +150,64 @@ export class ConversationService {
       );
     }
 
-    // 3. Save user message
-    const userMessage = await this.prisma.message.create({
+    // 1. Persist the raw inbound message. This is the ONLY persistence allowed
+    //    before an over-length/edge/command short-circuit (R5.2).
+    await this.prisma.message.create({
       data: {
         conversationId,
         role: 'user',
         direction: 'inbound',
-        content,
+        content: rawContent,
       },
     });
 
-    // 4. Load history
+    const settings = await this.getAgentSettings();
+    const agentName = settings.agentName;
+
+    // 2. Over-length rejection (R5.3): reply stating the limit, do not throw,
+    //    do not reach the LLM, do not mutate facts/lead.
+    const edgeKind = classifyEdgeInput(rawContent);
+    if (edgeKind === 'over_length') {
+      return this.finishCannedTurn(conversationId, edgeReply('over_length'), conversation);
+    }
+
+    // 3. Command resolution (R4): any message starting with '/' is handled here
+    //    and never reaches the LLM. Defined commands run their side effect and
+    //    confirm; undefined slash tokens list the available commands.
+    const command = resolveCommand(rawContent);
+    if (command.isCommand) {
+      // `/clear` and `/reset` wipe everything (messages, analyses, and the
+      // lead's qualification) and bring the conversation back to its initial
+      // state. We return the fresh greeting as the turn — exactly like a
+      // brand-new conversation — without appending a separate confirmation
+      // message, so the history contains only the greeting.
+      if (command.action === 'clear') {
+        const cleared = await this.clearConversation(conversationId);
+        return this.buildClearedTurn(cleared);
+      }
+      if (command.action === 'reset') {
+        const fresh = await this.resetConversation(conversationId);
+        return this.buildClearedTurn(fresh);
+      }
+      // Undefined slash token: list the available commands (no state change).
+      return this.finishCannedTurn(
+        conversationId,
+        availableCommandsReply(),
+        conversation,
+      );
+    }
+
+    // 4. Edge-input handling (R5): empty/whitespace/emoji-only/punctuation are
+    //    answered with a restate invitation and never mutate facts/lead.
+    if (edgeKind !== 'none') {
+      return this.finishCannedTurn(conversationId, edgeReply(edgeKind), conversation);
+    }
+
+    // 5. Load history for context extraction and composition.
     const messages = await this.prisma.message.findMany({
       where: { conversationId },
       orderBy: { createdAt: 'asc' },
     });
-
     const history: ConversationMessage[] = messages.map((msg) => ({
       role: msg.role as 'user' | 'assistant' | 'system',
       content: msg.content,
@@ -137,158 +215,186 @@ export class ConversationService {
 
     const totalStart = Date.now();
 
-    // 5. Extract facts (FactExtractorService - synchronous, no LLM)
-    const leadData = conversation.lead || {} as any;
-    const facts = this.factExtractor.extract(
+    // 6. Context extraction (R3, R9): the single source of truth for this turn.
+    const leadData = (conversation.lead || {}) as any;
+    const context: ConversationContext = this.contextTracker.build(
       {
         ...leadData,
-        secondaryPains: Array.isArray(leadData.secondaryPains) ? leadData.secondaryPains as string[] : null,
+        secondaryPains: Array.isArray(leadData.secondaryPains)
+          ? (leadData.secondaryPains as string[])
+          : null,
       },
       { stage: conversation.stage, handoffRequired: conversation.handoffRequired },
       history,
     );
+    const facts = context.facts;
+    const handoffState = context.handoffState;
 
-    // 6. Calculate score deterministically (ScoreCalculator - pure function)
-    const scoreResult = calculateScore(facts);
-
-    // 7. Get agent settings for name
-    const settings = await this.getAgentSettings();
-
-    // 8. Generate reply (IntentClassifier + LLM if needed)
-    const quickResult = await this.agentReply.generateQuickReply(
-      content,
-      history,
-      facts,
-      settings.agentName,
+    // 7. Intent resolution (R1, R2, R7): exactly one intent for this message.
+    const hasFacts = !!(
+      facts.segment ||
+      facts.mainPain ||
+      facts.whatsappUsage ||
+      facts.volume ||
+      facts.knownPains.length > 0
     );
+    const resolved = resolveIntent(rawContent, { hasFacts, handoffState });
+    const intent: IntentCategory = resolved.category;
 
-    // 9. CRITICAL: Validate reply is not empty
-    let finalReply = quickResult.reply;
-    if (!finalReply || finalReply.trim() === '' || finalReply === 'Sem resposta') {
-      finalReply = this.generateFallback(facts);
-      this.logger.warn(`[${conversationId}] Empty reply detected, using fallback`);
-    }
+    // 8. Resolve the handoff transition once (used both for the deterministic
+    //    handoff replies and for the final state). Frustration is treated like
+    //    an explicit human request so it routes to the team (legacy behavior).
+    const preference = detectPreference(rawContent);
+    const effectiveHandoffIntent: IntentCategory =
+      intent === 'frustration' ? 'preference_human' : intent;
+    const handoffDecision = this.handoffManager.resolve({
+      current: handoffState,
+      preference,
+      intent: effectiveHandoffIntent,
+      hasSegment: !!(facts.segment || facts.businessDescription),
+      hasAtLeastOnePain: !!facts.mainPain || facts.knownPains.length > 0,
+      userAbandoned: intent === 'desistance',
+    });
+    const nextHandoffState = handoffDecision.next;
 
-    // 9b. CRITICAL: Detect handoff in LLM reply text
-    // But ONLY for AFFIRMATIVE statements, NOT questions like "Posso encaminhar?"
-    let handoffSignal = quickResult.handoffSignal;
-    const replyLower = finalReply.toLowerCase();
-    const userMsgLower = content.toLowerCase().trim();
-
-    // STRONG accept phrases — trigger with segment OR handoffOffered
-    const strongAcceptPhrases = [
-      'sim, pode encaminhar', 'pode encaminhar', 'pode encaminhar sim',
-      'quero proposta', 'quero uma proposta',
-      'tá bom, manda', 'ta bom, manda', 'pode mandar',
-    ];
-    // WEAK accept phrases — only trigger if handoff was explicitly offered
-    const weakAcceptPhrases = [
-      'sim, quero', 'sim, pode', 'quero sim', 'pode seguir',
-    ];
-
-    // These are QUESTIONS (invitations) — do NOT trigger handoff
-    const handoffQuestionPhrases = [
-      'posso encaminhar', 'quer que eu encaminhe', 'quer que encaminhe',
-      'deseja o contato', 'deseja o encaminhamento', 'quer seguir',
-      'quer que eu faça isso', 'quer que eu prossiga',
-    ];
-    const isHandoffQuestion = handoffQuestionPhrases.some((p) => replyLower.includes(p));
-
-    // These are AFFIRMATIVE handoff confirmations
-    const handoffAffirmPhrases = [
-      'vou encaminhar', 'encaminhando para a equipe',
-      'vou conectar você', 'vou conectar voce',
-      'equipe entrará em contato', 'equipe vai entrar em contato',
-      'entrarão em contato', 'entrarao em contato',
-      'encaminhar seu caso', 'encaminhar seu contato',
-      'conectar com nossa equipe', 'conectar você com nossa equipe',
-      'estou encaminhando', 'já encaminhei', 'encaminhando você',
-      'eles entrarão em contato', 'entrarão em contato',
-      'em breve entram em contato', 'em breve eles',
-    ];
-
-    if (handoffSignal === 'none' && !isHandoffQuestion && handoffAffirmPhrases.some((p) => replyLower.includes(p))) {
-      // Only treat LLM affirm as handoff if user message ALSO contained an acceptance
-      // Otherwise the LLM is just being proactive — mark as offered, not accepted
-      const userAlsoAccepted = [...strongAcceptPhrases, ...weakAcceptPhrases].some(
-        (p) => userMsgLower === p || userMsgLower.includes(p),
-      ) || (userMsgLower === 'manda' && facts.handoffOffered);
-
-      if (userAlsoAccepted) {
-        handoffSignal = 'accepted';
-        this.logger.debug(`[${conversationId}] Handoff detected: LLM affirm + user accept`);
-      } else {
-        // LLM offered handoff proactively — do NOT lock to chamar_humano
-        handoffSignal = 'suggested';
-        this.logger.debug(`[${conversationId}] LLM affirm without user accept — marking as suggested only`);
-      }
-    }
-
-    // 9b2. Detect handoff from user accept phrase (only if context exists)
-    if (handoffSignal === 'none' && strongAcceptPhrases.some((p) => userMsgLower === p || userMsgLower.includes(p))) {
-      if (facts.segment || facts.handoffOffered) {
-        handoffSignal = 'accepted';
-        this.logger.debug(`[${conversationId}] Handoff detected from user strong accept phrase`);
-      }
-    }
-    if (handoffSignal === 'none' && weakAcceptPhrases.some((p) => userMsgLower === p || userMsgLower.includes(p))) {
-      if (facts.handoffOffered) {
-        handoffSignal = 'accepted';
-        this.logger.debug(`[${conversationId}] Handoff detected from user weak accept phrase (handoff was offered)`);
-      }
-    }
-    if (handoffSignal === 'none' && userMsgLower === 'manda' && facts.handoffOffered) {
-      handoffSignal = 'accepted';
-    }
-
-    // 9c. Detect desistance
-    const desistancePhrases = ['deixa pra lá', 'esquece', 'vou procurar outro', 'não quero mais', 'não preciso'];
-    const isDesistance = desistancePhrases.some((p) => content.toLowerCase().includes(p));
-
-    // 9d. CRITICAL: Apply ResponseGuard (replaces sanitizeReply + corrupted text check)
+    // 9. Deterministic answers bypass the LLM; only direct_question (non-price)
+    //    and general reach the ResponseComposer.
     const pricing = await this.pricingConfig.get();
+    let finalReply: string;
+    let usedLLM = false;
+    let stage = conversation.stage || 'descoberta';
+
+    switch (intent) {
+      case 'price_question':
+        finalReply = composePriceAnswer({
+          pricingRangeEnabled: pricing.pricingRangeEnabled,
+          startingPriceText: pricing.pricingStartingAtText,
+          handoffState,
+        });
+        stage = 'conversao';
+        break;
+
+      case 'preference_continue':
+        finalReply = REPLY_PREFERENCE_CONTINUE;
+        break;
+
+      case 'preference_human':
+        finalReply = handoffDecision.reply ?? REPLY_HANDOFF_ACCEPT;
+        stage = 'handoff_humano';
+        break;
+
+      case 'handoff_accept':
+        finalReply = handoffDecision.reply ?? REPLY_HANDOFF_ACCEPT;
+        stage = 'handoff_humano';
+        break;
+
+      case 'frustration':
+        finalReply = REPLY_FRUSTRATION;
+        stage = 'handoff_humano';
+        break;
+
+      case 'handoff_completed_ack':
+        finalReply = REPLY_HANDOFF_COMPLETED_ACK;
+        stage = 'handoff_humano';
+        break;
+
+      case 'desistance':
+        finalReply = REPLY_DESISTANCE;
+        break;
+
+      case 'greeting':
+        finalReply =
+          facts.messageCount > 1
+            ? 'Olá. Me conta qual é o seu negócio e como vocês usam o WhatsApp hoje.'
+            : `Olá. Sou o ${agentName}, atendente inteligente da Decodifica. Vou te ajudar a entender quais partes do seu atendimento podem ser automatizadas com IA de forma humanizada. Para começar, me conta qual é o seu negócio e como vocês usam o WhatsApp hoje.`;
+        stage = 'abertura';
+        break;
+
+      case 'acknowledgment':
+        finalReply = REPLY_ACKNOWLEDGMENT;
+        break;
+
+      case 'direct_question':
+      case 'general':
+      default: {
+        // 9a. LLM composition (R1) — the only LLM entry point.
+        const llmResult = await this.agentReply.composeReply(
+          history,
+          context,
+          agentName,
+          resolved.isDirectQuestion,
+        );
+        usedLLM = true;
+        stage = llmResult.stage || stage;
+        finalReply = llmResult.reply;
+        // 9b. Contextual fallback (R3.4) on empty/unparseable output.
+        if (!finalReply || finalReply.trim() === '') {
+          finalReply = this.agentReply.buildContextualFallback(facts);
+          this.logger.warn(`[${conversationId}] Empty LLM reply, using contextual fallback`);
+        }
+        break;
+      }
+    }
+
+    // 10. Response guard (R1.4, R2, R5.4, R6, R8): the single post-processor.
     const guardInput: GuardInput = {
       reply: finalReply,
-      userMessage: content,
-      segment: facts.segment,
-      mainPain: facts.mainPain,
-      volume: facts.volume,
-      handoffOffered: facts.handoffOffered,
-      handoffAccepted: facts.handoffAccepted,
-      handoffCompleted: facts.handoffCompleted,
-      priceAskedCount: facts.priceAskedCount,
-      pricingRangeEnabled: pricing.pricingRangeEnabled,
-      startingPrice: pricing.pricingStartingAtText,
-      conversationHistory: history
-        .filter((msg): msg is ConversationMessage & { role: 'user' | 'assistant' } =>
-          msg.role === 'user' || msg.role === 'assistant',
-        ),
+      userMessage: rawContent,
+      intent,
+      context,
+      pricing: {
+        pricingRangeEnabled: pricing.pricingRangeEnabled,
+        startingPriceText: pricing.pricingStartingAtText,
+      },
     };
     const guardOutput = this.responseGuard.guard(guardInput);
     finalReply = guardOutput.reply;
-
     if (guardOutput.changed) {
       this.logger.debug(`[${conversationId}] Guard applied: ${guardOutput.guardReason}`);
     }
-
-    // If guard reason includes handoff_offered_not_accepted, do NOT treat as accepted
-    if (guardOutput.guardReason?.includes('handoff_offered_not_accepted') && handoffSignal === 'accepted') {
-      handoffSignal = 'suggested';
-      this.logger.debug(`[${conversationId}] Guard downgraded handoff from accepted to suggested (offer only)`);
+    if (!finalReply || finalReply.trim() === '') {
+      finalReply = this.agentReply.buildContextualFallback(facts);
+      this.logger.warn(`[${conversationId}] Reply empty after guard, using contextual fallback`);
     }
 
-    // 9e. If guard resulted in empty reply, use fallback
-    if (!finalReply || finalReply.trim() === '') {
-      finalReply = this.generateFallback(facts);
-      this.logger.warn(`[${conversationId}] Reply empty after guard, using fallback`);
+    // 11. Handoff state + score resolution (R7, R9, R10).
+    const previousScore = conversation.lead?.leadScore || 0;
+    const baseScore = calculateScore(facts);
+    const isHandoff =
+      nextHandoffState === 'accepted' || nextHandoffState === 'completed';
+
+    let finalScore: number;
+    let finalTemperature: string;
+    let finalStatus: string;
+    let finalHandoff: boolean;
+
+    if (intent === 'desistance') {
+      // Desistance sets status perdido and handoff false (abandoned: the
+      // non-decreasing rule does not apply, R9.3).
+      finalStatus = 'perdido';
+      finalTemperature = 'frio';
+      finalScore = clampScore(baseScore.score);
+      finalHandoff = false;
+    } else if (isHandoff) {
+      finalStatus = 'chamar_humano';
+      finalScore = clampNonDecreasing(previousScore, Math.max(baseScore.score, 80));
+      finalTemperature = 'quente';
+      finalHandoff = true;
+    } else {
+      // Includes preference_continue: a continue preference must NOT force a
+      // handoff (R7.2). Score is non-decreasing on an active conversation.
+      finalStatus = 'qualificando';
+      finalScore = clampNonDecreasing(previousScore, baseScore.score);
+      finalTemperature = temperatureFor(finalScore);
+      finalHandoff = false;
     }
 
     const totalMs = Date.now() - totalStart;
     this.logger.log(
-      `[${conversationId}] Reply in ${totalMs}ms | local=${quickResult.usedLocalRule} | fallback=${quickResult.usedFallback} | score=${scoreResult.score} | temp=${scoreResult.temperature} | llm=${quickResult.llmMs}ms | model=${quickResult.model || 'local'}`,
+      `[${conversationId}] Reply in ${totalMs}ms | intent=${intent} | llm=${usedLLM} | handoff=${nextHandoffState} | score=${finalScore} | temp=${finalTemperature}`,
     );
 
-    // 10. Save assistant message
+    // 12. Persist assistant message.
     const assistantMessage = await this.prisma.message.create({
       data: {
         conversationId,
@@ -298,38 +404,7 @@ export class ConversationService {
       },
     });
 
-    // 11. Determine final state (DETERMINISTIC)
-    const isHandoff = handoffSignal === 'accepted' || handoffSignal === 'completed';
-    const previousStatus = conversation.lead?.status || 'novo';
-    const previousScore = conversation.lead?.leadScore || 0;
-    const previousHandoff = conversation.handoffRequired || previousStatus === 'chamar_humano';
-
-    let finalScore: number;
-    let finalTemperature: string;
-    let finalStatus: string;
-    let finalHandoff: boolean;
-
-    if (isDesistance) {
-      // Desistance is the ONLY case where handoff can go back to false
-      finalStatus = 'perdido';
-      finalTemperature = 'frio';
-      finalScore = Math.min(scoreResult.score, 100);
-      finalHandoff = false;
-    } else if (isHandoff || previousHandoff) {
-      // MONOTONICITY RULE: Once handoff=true, it stays true forever (unless desistance)
-      finalStatus = 'chamar_humano';
-      finalTemperature = 'quente';
-      finalScore = Math.min(Math.max(scoreResult.score, previousScore, 80), 100);
-      finalHandoff = true;
-    } else {
-      finalStatus = 'qualificando';
-      const computedScore = Math.min(Math.max(scoreResult.score, previousScore), 100);
-      finalScore = computedScore;
-      finalTemperature = finalScore >= 70 ? 'quente' : finalScore >= 40 ? 'morno' : 'frio';
-      finalHandoff = false;
-    }
-
-    // 12. Update lead with score + facts
+    // 13. Persist newly established facts + score to the lead every turn (R9.4).
     try {
       const leadUpdate: Record<string, unknown> = {
         leadScore: finalScore,
@@ -350,7 +425,7 @@ export class ConversationService {
       this.logger.error(`[${conversationId}] Failed to update lead: ${err instanceof Error ? err.message : 'Unknown'}`);
     }
 
-    // 13. If handoff → update conversation status
+    // 14. If handoff → update conversation state.
     if (finalHandoff) {
       try {
         await this.prisma.conversation.update({
@@ -362,23 +437,20 @@ export class ConversationService {
       }
     }
 
-    // 14. Fire async analysis (don't await — runs in background)
-    if (!quickResult.usedLocalRule) {
-      this.agentAnalysis.runAsync(
-        conversationId,
-        conversation.leadId,
-        history,
-        quickResult.stage,
-      ).catch((err) => {
-        this.logger.error(`[${conversationId}] Async analysis error: ${err.message}`);
-      });
+    // 15. Fire async analysis for LLM-path turns only (preserved exactly).
+    if (usedLLM) {
+      this.agentAnalysis
+        .runAsync(conversationId, conversation.leadId, history, stage)
+        .catch((err) => {
+          this.logger.error(`[${conversationId}] Async analysis error: ${err.message}`);
+        });
     }
 
-    // 15. Return response
+    // 16. Return response.
     const qualification = {
-      stage: quickResult.stage as any,
+      stage: stage as any,
       detectedSegment: facts.segment,
-      detectedIntent: quickResult.intent as any,
+      detectedIntent: intent as any,
       mainPain: facts.mainPain,
       recommendedService: conversation.lead?.recommendedService ?? null,
       leadScore: finalScore,
@@ -388,7 +460,7 @@ export class ConversationService {
       handoffReason: finalHandoff ? 'Cliente aceitou encaminhamento' : null,
       commercialSummary: null,
       nextBestQuestion: null,
-      scoreReasons: scoreResult.reasons,
+      scoreReasons: baseScore.reasons,
       objections: [] as string[],
       urgency: 'desconhecida' as const,
       estimatedVolume: 'desconhecido' as const,
@@ -400,20 +472,84 @@ export class ConversationService {
   }
 
   /**
-   * Generates a contextual fallback when reply is empty.
-   * NEVER returns empty string.
+   * Persists a deterministic canned assistant reply (over-length, edge input,
+   * or command confirmation) without any fact/lead mutation, and returns the
+   * passthrough qualification derived from the current lead state. Used by the
+   * short-circuit stages that must never reach the LLM (R4.3, R5.2, R5.3).
    */
-  private generateFallback(facts: KnownFacts): string {
-    if (facts.segment && facts.mainPain) {
-      return `Pelo que você descreveu sobre ${facts.segment}, faz sentido avaliar como automatizar essa parte. Posso encaminhar para a equipe da Decodifica te passar um caminho mais preciso. Quer que eu encaminhe?`;
-    }
-    if (facts.segment && facts.volume) {
-      return `Com esse volume, existem várias formas de automatizar o atendimento. Posso encaminhar para a equipe avaliar o melhor caminho para ${facts.segment}. Interessa?`;
-    }
-    if (facts.segment) {
-      return `Para ${facts.segment}, existem várias possibilidades de automação. Como é o volume de mensagens no WhatsApp hoje?`;
-    }
-    return 'Para eu te ajudar melhor, me conta qual é o seu negócio e como vocês usam o WhatsApp hoje.';
+  private async finishCannedTurn(
+    conversationId: string,
+    reply: string,
+    conversation: { stage: string; handoffRequired: boolean; lead?: any },
+  ) {
+    const assistantMessage = await this.prisma.message.create({
+      data: {
+        conversationId,
+        role: 'assistant',
+        direction: 'outbound',
+        content: reply,
+      },
+    });
+
+    const lead = conversation.lead || {};
+    const qualification = {
+      stage: conversation.stage as any,
+      detectedSegment: lead.segment ?? null,
+      detectedIntent: 'outro' as any,
+      mainPain: lead.mainPain ?? null,
+      recommendedService: lead.recommendedService ?? null,
+      leadScore: lead.leadScore ?? 0,
+      temperature: (lead.temperature ?? 'frio') as any,
+      status: (lead.status ?? 'novo') as any,
+      shouldHandoff: conversation.handoffRequired ?? false,
+      handoffReason: null,
+      commercialSummary: null,
+      nextBestQuestion: null,
+      scoreReasons: [] as string[],
+      objections: [] as string[],
+      urgency: 'desconhecida' as const,
+      estimatedVolume: 'desconhecido' as const,
+      decisionRole: 'desconhecido' as const,
+      budgetSignal: 'desconhecido' as const,
+    };
+
+    return { message: assistantMessage, qualification };
+  }
+
+  /**
+   * Returns the turn produced by a `/clear` or `/reset` command after the
+   * conversation has been fully wiped and the lead reset. The reply is the
+   * fresh greeting (the only message in the cleared conversation) and the
+   * qualification is the clean default state of a brand-new lead — so the
+   * client sees exactly a "from the beginning" conversation. No confirmation
+   * message is appended.
+   */
+  private buildClearedTurn(cleared: { messages?: Array<any> }) {
+    const messages = cleared.messages ?? [];
+    const greeting = messages[messages.length - 1] ?? null;
+
+    const qualification = {
+      stage: 'abertura' as any,
+      detectedSegment: null,
+      detectedIntent: 'outro' as any,
+      mainPain: null,
+      recommendedService: null,
+      leadScore: 0,
+      temperature: 'frio' as any,
+      status: 'novo' as any,
+      shouldHandoff: false,
+      handoffReason: null,
+      commercialSummary: null,
+      nextBestQuestion: null,
+      scoreReasons: [] as string[],
+      objections: [] as string[],
+      urgency: 'desconhecida' as const,
+      estimatedVolume: 'desconhecido' as const,
+      decisionRole: 'desconhecido' as const,
+      budgetSignal: 'desconhecido' as const,
+    };
+
+    return { message: greeting, qualification };
   }
 
   /**
@@ -492,7 +628,11 @@ export class ConversationService {
       await tx.agentAnalysis.deleteMany({ where: { conversationId } });
       await tx.message.deleteMany({ where: { conversationId } });
 
-      // Reset conversation state
+      // Reset conversation state — a full restart "from the beginning". This
+      // also clears the handoff/takeover flags and unpauses the bot, so a
+      // `/clear` (or `/reset`) genuinely restarts the conversation: the bot
+      // resumes auto-replying and is no longer stuck in a completed-handoff or
+      // human-takeover state.
       await tx.conversation.update({
         where: { id: conversationId },
         data: {
@@ -501,6 +641,11 @@ export class ConversationService {
           lastIntent: null,
           handoffRequired: false,
           handoffReason: null,
+          handoffOffered: false,
+          handoffAccepted: false,
+          handoffCompleted: false,
+          botPaused: false,
+          assignedTo: null,
         },
       });
 

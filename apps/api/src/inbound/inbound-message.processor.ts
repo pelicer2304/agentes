@@ -17,6 +17,8 @@ import {
   type NormalizationReject,
 } from '../modules/channels/evolution/evolution-normalizer';
 import { EvolutionService } from '../modules/channels/evolution/evolution.service';
+import { resolveCommand } from '../agent/command-handler';
+import type { CommandResolution } from '../agent/conversation-types';
 
 /**
  * The maximum inbound text length passed to the Agent_Engine. Content longer
@@ -305,6 +307,18 @@ export class InboundMessageProcessor {
       const context = await this.resolveLeadAndConversation(normalized);
       metrics.conversationId = context.conversation.id;
       metrics.leadId = context.leadId;
+
+      // 4b. Typed control commands (/clear, /reset, /help, unknown slash token)
+      //     execute REGARDLESS of gating. They are control actions, not
+      //     conversational replies, so a paused bot (or a completed-handoff
+      //     conversation) must still honor them — otherwise a user could never
+      //     reset/clear a conversation from WhatsApp once it was paused.
+      if (normalized.messageType === 'text') {
+        const command = resolveCommand(normalized.content);
+        if (command.isCommand) {
+          return this.handleControlCommand(webhookLogId, normalized, context, command);
+        }
+      }
 
       // 5. Unsupported media (audio/image/document): save + single notice
       //    (Req 6.6).
@@ -751,6 +765,102 @@ export class InboundMessageProcessor {
         payload: { phone: inbound.from, stage: 'handoff_completed_confirmation' },
       });
     }
+  }
+
+  /**
+   * Handle a typed control command (`/clear`, `/reset`, `/help`, or an unknown
+   * slash token) received over WhatsApp.
+   *
+   * Control commands bypass bot gating on purpose (Inbound gating is for
+   * conversational auto-replies, not control actions): a paused or
+   * handoff-completed conversation must still be resettable from WhatsApp.
+   *
+   *  - `/clear` and `/reset` → wipe the conversation messages/analyses and reset
+   *    the lead to its initial state via the frozen engine's
+   *    {@link ConversationService.clearConversation}, then send ONLY the fresh
+   *    greeting (already persisted by `clearConversation`). Both map to
+   *    `clearConversation` so the SAME WhatsApp conversation is reused —
+   *    `createConversation`/`resetConversation` would create a playground
+   *    conversation, which is wrong for the WhatsApp channel.
+   *  - `/help` / unknown slash token → reply with the available-commands listing
+   *    without changing any state (inbound + outbound are persisted normally).
+   *
+   * The engine is never invoked for a command, so no `agentAnalysis.runAsync`
+   * fires here. A send failure is tolerated (the state change still stands) and
+   * the webhook still returns 200 (Req 9.6).
+   */
+  private async handleControlCommand(
+    webhookLogId: string,
+    inbound: InboundMessage,
+    context: ResolvedContext,
+    command: CommandResolution,
+  ): Promise<ProcessOutcome> {
+    let reply: string;
+    let eventType: string;
+
+    if (command.action === 'clear' || command.action === 'reset') {
+      // Full wipe + lead reset. `clearConversation` deletes prior messages and
+      // analyses, resets the lead/conversation, and creates the fresh greeting
+      // (persisted), returning the refreshed conversation.
+      const cleared = (await this.conversationService.clearConversation(
+        context.conversation.id,
+      )) as { messages?: Array<{ content: string }> };
+      const messages = cleared.messages ?? [];
+      reply =
+        messages[messages.length - 1]?.content ?? command.confirmationReply;
+      eventType = `command:${command.action}`;
+
+      // The greeting is already persisted by clearConversation; only deliver it.
+      const sent = await this.sendReply(
+        inbound.from,
+        reply,
+        inbound.instance,
+        context.conversation.id,
+      );
+      await this.recordBotEvent(sent ? 'message_outbound_sent' : 'evolution_error', {
+        conversationId: context.conversation.id,
+        leadId: context.leadId,
+        payload: { command: command.action, ...(sent ? {} : { stage: 'command_reply' }) },
+      });
+    } else {
+      // `/help` or an unknown slash token: list the available commands, no state
+      // change. Persist the inbound + outbound like a normal turn.
+      reply = command.confirmationReply;
+      eventType = command.name ? `command:${command.name}` : 'command:unknown';
+
+      await this.saveInboundMessage(context.conversation.id, inbound);
+      const sent = await this.sendReply(
+        inbound.from,
+        reply,
+        inbound.instance,
+        context.conversation.id,
+      );
+      if (sent) {
+        await this.persistOutbound(null, inbound, reply, context);
+        await this.recordBotEvent('message_outbound_sent', {
+          conversationId: context.conversation.id,
+          leadId: context.leadId,
+          payload: { command: eventType },
+        });
+      } else {
+        await this.recordBotEvent('evolution_error', {
+          conversationId: context.conversation.id,
+          leadId: context.leadId,
+          payload: { phone: inbound.from, stage: 'command_reply' },
+        });
+      }
+    }
+
+    await this.finalizeWebhookLog(webhookLogId, {
+      eventType,
+      instanceName: inbound.instance,
+      externalMessageId: inbound.externalMessageId,
+      phone: inbound.from,
+      processed: true,
+      error: null,
+    });
+    this.logger.debug(`Inbound control command handled (${eventType})`);
+    return { httpStatus: 200, action: 'replied' };
   }
 
   /**

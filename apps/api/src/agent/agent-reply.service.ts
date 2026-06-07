@@ -3,6 +3,7 @@ import { LLM_PROVIDER_TOKEN, LLMProvider } from '../llm/llm-provider.interface';
 import { ConversationMessage } from './dto/agent-settings.dto';
 import { classifyIntent } from './intent-classifier';
 import { KnownFacts } from './fact-extractor.service';
+import { ConversationContext, SaidRecord } from './conversation-types';
 
 export interface QuickReplyResult {
   reply: string;
@@ -53,6 +54,68 @@ export class AgentReplyService {
 
     // Step 3: Call LLM with minimal prompt
     return this.callLLM(recentHistory, facts, agentName);
+  }
+
+  /**
+   * ResponseComposer (LLM path). Refocused per the conversational-agent-quality
+   * design: this method is the ONLY LLM entry point of the pipeline and it
+   * assumes it is invoked exclusively for `direct_question` (non-price) and
+   * `general` intents. All other intents are resolved deterministically by the
+   * pipeline's composers (commands, edge inputs, price, preference, handoff,
+   * greeting/ack/desistance) and never reach here.
+   *
+   * The prompt is built from the full `ConversationContext`:
+   *   - known facts -> prohibited-questions block (never re-ask known facts), and
+   *   - the `SaidRecord` -> explicit "do not re-offer demo/simulation/handoff/
+   *     AI-explanation" instructions when the corresponding flags are set.
+   * It requests answer-before-follow-up ordering (R1.4) and, for a direct
+   * question, instructs the model to address the question's subject first and,
+   * when it cannot fully answer, to acknowledge the specific subject and state
+   * what is needed (R1.3).
+   *
+   * On empty/unparseable LLM output this returns a result whose `reply` is the
+   * empty string (with `usedFallback: true`), so the pipeline substitutes the
+   * contextual fallback from `buildContextualFallback` (R3.4). It never emits
+   * the generic "difficulty processing" message itself.
+   */
+  async composeReply(
+    recentHistory: ConversationMessage[],
+    context: ConversationContext,
+    agentName: string,
+    isDirectQuestion: boolean,
+  ): Promise<QuickReplyResult> {
+    const prompt = this.buildContextualPrompt(
+      context.facts,
+      agentName,
+      context.said,
+      isDirectQuestion,
+    );
+    return this.runLLM(recentHistory, prompt);
+  }
+
+  /**
+   * Builds a non-empty, fact-derived contextual fallback used when the LLM
+   * returns empty/unparseable output (R3.1, R3.4). It references the available
+   * facts when any exist and is NEVER the generic "difficulty processing"
+   * message ("Estou com dificuldade..."/"dificuldades técnicas").
+   */
+  buildContextualFallback(facts: KnownFacts): string {
+    if (facts.segment && facts.mainPain) {
+      return `Pelo que você descreveu sobre ${facts.segment}, faz sentido avaliar como automatizar essa parte. Posso encaminhar para a equipe da Decodifica te passar um caminho mais preciso. Quer que eu encaminhe?`;
+    }
+    if (facts.segment && facts.volume) {
+      return `Com esse volume, existem várias formas de automatizar o atendimento. Posso encaminhar para a equipe avaliar o melhor caminho para ${facts.segment}. Interessa?`;
+    }
+    if (facts.segment) {
+      return `Para ${facts.segment}, existem várias possibilidades de automação. Como é o volume de mensagens no WhatsApp hoje?`;
+    }
+    if (facts.mainPain) {
+      return `Sobre o ponto que você levantou, dá para estruturar o atendimento no WhatsApp para resolver isso. Me conta qual é o seu negócio para eu te direcionar melhor.`;
+    }
+    if (facts.whatsappUsage) {
+      return 'Com base em como vocês usam o WhatsApp, dá para avaliar o que faz sentido automatizar. Vocês recebem mais dúvidas, pedidos, orçamentos ou suporte?';
+    }
+    return 'Para eu te ajudar melhor, me conta qual é o seu negócio e como vocês usam o WhatsApp hoje.';
   }
 
   private handleLocal(
@@ -141,7 +204,21 @@ export class AgentReplyService {
     facts: KnownFacts,
     agentName: string,
   ): Promise<QuickReplyResult> {
-    const prompt = this.buildMinimalPrompt(facts, agentName);
+    const prompt = this.buildContextualPrompt(facts, agentName);
+    return this.runLLM(recentHistory, prompt);
+  }
+
+  /**
+   * Shared LLM execution core used by both the legacy `generateQuickReply`
+   * path and the refocused `composeReply` ResponseComposer. Calls the provider
+   * with the prebuilt prompt and the recent history, parses the minimal JSON,
+   * and — on empty/unparseable output or provider error — returns a result
+   * whose `reply` is empty so the pipeline substitutes the contextual fallback.
+   */
+  private async runLLM(
+    recentHistory: ConversationMessage[],
+    prompt: string,
+  ): Promise<QuickReplyResult> {
     const startTime = Date.now();
 
     try {
@@ -157,6 +234,25 @@ export class AgentReplyService {
 
       const llmMs = Date.now() - startTime;
       const parsed = this.parseMinimalResponse(response.content);
+
+      // Empty/unparseable output -> return empty reply so the pipeline
+      // substitutes the contextual fallback (R3.4). Never emit a generic
+      // "difficulty processing" message here.
+      if (!parsed.reply || parsed.reply.trim() === '') {
+        this.logger.warn('LLM returned empty/unparseable reply, deferring to contextual fallback');
+        return {
+          reply: '',
+          stage: parsed.stage || 'descoberta',
+          intent: parsed.intent || 'outro',
+          handoffSignal: 'none',
+          needsAsyncAnalysis: false,
+          usedLocalRule: false,
+          usedFallback: true,
+          fallbackReason: 'empty_or_unparseable',
+          llmMs,
+          model: response.model,
+        };
+      }
 
       return {
         reply: parsed.reply,
@@ -174,7 +270,7 @@ export class AgentReplyService {
       this.logger.error(`LLM failed in ${llmMs}ms: ${error instanceof Error ? error.message : 'Unknown'}`);
 
       return {
-        reply: '', // Will be caught by empty validation in ConversationService
+        reply: '', // Empty -> pipeline substitutes the contextual fallback
         stage: 'descoberta',
         intent: 'outro',
         handoffSignal: 'none',
@@ -208,7 +304,12 @@ export class AgentReplyService {
     }
   }
 
-  private buildMinimalPrompt(facts: KnownFacts, agentName: string): string {
+  private buildContextualPrompt(
+    facts: KnownFacts,
+    agentName: string,
+    said?: SaidRecord,
+    isDirectQuestion = false,
+  ): string {
     const knownLines: string[] = [];
     if (facts.segment) knownLines.push(`Negócio: ${facts.segment}`);
     if (facts.businessDescription) knownLines.push(`Descrição: ${facts.businessDescription}`);
@@ -237,10 +338,22 @@ export class AgentReplyService {
       nextActionNote = '\nPRÓXIMO PASSO: Já tem dor + volume. Ofereça encaminhamento CONTEXTUALIZADO: resuma o cenário do cliente e pergunte se quer que encaminhe. NUNCA responda apenas "Posso encaminhar?" isolado.';
     }
 
+    // Do-not-re-offer block derived from the SaidRecord (R6.3 / R6.4 / R2.4).
+    const doNotReofferNote = this.buildDoNotReofferNote(said);
+
+    // Answer-before-follow-up ordering (R1.4) and, for direct questions,
+    // subject-first handling (R1.3).
+    let orderingNote =
+      '\nORDEM DA RESPOSTA: Primeiro responda/atenda à mensagem do cliente; só depois, se necessário, faça UMA pergunta de continuidade. A resposta SEMPRE vem antes da pergunta.';
+    if (isDirectQuestion) {
+      orderingNote +=
+        '\nO cliente fez uma PERGUNTA DIRETA. Comece tratando exatamente o assunto perguntado. Se não conseguir responder por completo, reconheça o assunto específico e diga o que é necessário para responder (não desvie do assunto).';
+    }
+
     return `Você é ${agentName}, pré-vendedor da Decodifica. Solução = atendimento humanizado com IA para WhatsApp.
 
 ${factsBlock}
-${nextActionNote}
+${nextActionNote}${doNotReofferNote}${orderingNote}
 
 REGRAS ABSOLUTAS:
 - Max 250 chars na resposta
@@ -262,6 +375,26 @@ REGRAS ABSOLUTAS:
 
 JSON:
 {"reply":"texto","stage":"abertura|descoberta|mapeamento_de_dores|diagnostico_operacional|explicacao_solucao|conversao|handoff_humano","intent":"vendas|suporte|agendamento|duvidas|orcamento|integracao|curiosidade|outro"}`;
+  }
+
+  /**
+   * Builds the "do not re-offer" instruction block from the SaidRecord so the
+   * LLM does not repeat a demo/simulation offer, a handoff offer, or the
+   * AI-behavior explanation that was already made (R6.3, R6.4, R2.4).
+   */
+  private buildDoNotReofferNote(said?: SaidRecord): string {
+    if (!said) return '';
+    const lines: string[] = [];
+    if (said.offeredDemo) {
+      lines.push('- NÃO ofereça novamente demonstração ou simulação (já foi oferecida). Só fale nisso se o cliente pedir.');
+    }
+    if (said.offeredHandoff) {
+      lines.push('- NÃO ofereça novamente encaminhamento para a equipe (já foi oferecido), a menos que o cliente peça.');
+    }
+    if (said.explainedAiBehavior) {
+      lines.push('- NÃO repita a explicação de como a IA funciona (já foi explicada).');
+    }
+    return lines.length > 0 ? `\nNÃO REPETIR (já dito antes):\n${lines.join('\n')}` : '';
   }
 
   private buildSecondaryPainQuestion(facts: KnownFacts): string {
