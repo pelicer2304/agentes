@@ -66,12 +66,21 @@ export class EvolutionService {
   async sendTextMessage(
     to: string,
     text: string,
+    delayMs?: number,
   ): Promise<EvolutionResult<{ externalMessageId: string }>> {
+    // When a delay is provided, Evolution shows the "composing" (digitando)
+    // presence to the recipient for `delay` ms before delivering the message —
+    // this is the reliable way to render a human-like typing indicator.
+    const body: Record<string, unknown> = { number: to, text };
+    if (typeof delayMs === 'number' && delayMs > 0) {
+      body.delay = Math.round(delayMs);
+      body.presence = 'composing';
+    }
     return this.request<{ externalMessageId: string }>(
       {
         method: 'POST',
         path: `/message/sendText/${this.instance}`,
-        body: { number: to, text },
+        body,
       },
       (data) => {
         const payload = data as { key?: { id?: string }; id?: string };
@@ -192,12 +201,19 @@ export class EvolutionService {
    *
    * @param to - Destination phone number.
    */
-  async sendTypingOrPresence(to: string): Promise<EvolutionResult<void>> {
+  async sendTypingOrPresence(
+    to: string,
+    delayMs = 3000,
+  ): Promise<EvolutionResult<void>> {
     return this.request<void>(
       {
         method: 'POST',
         path: `/chat/sendPresence/${this.instance}`,
-        body: { number: to, presence: 'composing' },
+        body: {
+          number: to,
+          presence: 'composing',
+          delay: Math.round(delayMs),
+        },
       },
       () => undefined,
     );

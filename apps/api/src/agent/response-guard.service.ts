@@ -466,7 +466,74 @@ function userRequestedDemo(userMessage: string): boolean {
   return DEMO_REQUEST_KEYWORDS.some((k) => lower.includes(k));
 }
 
-// ─── Rule Definitions ────────────────────────────────────────────────────────
+/** Lowercase, strip diacritics, return the set of words with length >= 4. */
+function significantWords(text: string): Set<string> {
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const words = normalized.match(/[a-z0-9]+/g) ?? [];
+  const stop = new Set([
+    'voce',
+    'voce',
+    'como',
+    'para',
+    'mais',
+    'esse',
+    'essa',
+    'isso',
+    'minha',
+    'meus',
+    'minhas',
+    'pelo',
+    'pela',
+    'com',
+    'que',
+    'dos',
+    'das',
+    'uma',
+    'meu',
+  ]);
+  return new Set(words.filter((w) => w.length >= 4 && !stop.has(w)));
+}
+
+/**
+ * Strip a leading "echo" clause that merely restates what the client just said
+ * (e.g. "Com vendas de etiquetas e problemas no atendimento, me conta ..."),
+ * which reads as redundant. We only strip the part before the FIRST comma when
+ * that clause shares >= 2 significant words with the client's message, keeping
+ * the rest (the actual answer/question) and capitalizing it. Returns the reply
+ * unchanged when there is no such echo.
+ */
+function stripLeadingEcho(reply: string, userMessage: string): string {
+  const commaIdx = reply.indexOf(',');
+  if (commaIdx < 6 || commaIdx > 100) {
+    return reply;
+  }
+  const lead = reply.slice(0, commaIdx);
+  // Never strip if the lead clause itself is the question or holds terminal
+  // punctuation (it is then a real sentence, not a preamble).
+  if (/[?.!]/.test(lead)) {
+    return reply;
+  }
+  const rest = reply.slice(commaIdx + 1).trim();
+  if (rest.length < 8) {
+    return reply;
+  }
+
+  const leadWords = significantWords(lead);
+  const msgWords = significantWords(userMessage);
+  let shared = 0;
+  for (const w of leadWords) {
+    if (msgWords.has(w)) {
+      shared += 1;
+    }
+  }
+  if (shared < 2) {
+    return reply;
+  }
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
 
 const rule2HandoffCompleted: GuardRule = {
   name: 'handoff_completed',
@@ -905,6 +972,31 @@ const rule7BlockPrematureHandoff: GuardRule = {
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 /**
+ * Leading-echo removal: strip a redundant opening clause that merely restates
+ * what the client just said (e.g. "Com vendas de etiquetas e problemas no
+ * atendimento, me conta ..."). Only applies on the LLM discovery path
+ * (`general` / `direct_question`) and never to a handoff offer, so the
+ * qualified contextual handoff summary keeps its preamble.
+ */
+const ruleStripLeadingEcho: GuardRule = {
+  name: 'leading_echo_removed',
+  priority: 14,
+  type: 'partial-transform',
+  applies(input: GuardInput, currentReply: string): boolean {
+    if (input.intent !== 'general' && input.intent !== 'direct_question') {
+      return false;
+    }
+    if (containsHandoffOfferBroad(currentReply)) {
+      return false;
+    }
+    return stripLeadingEcho(currentReply, input.userMessage) !== currentReply;
+  },
+  apply(input: GuardInput, currentReply: string): string {
+    return stripLeadingEcho(currentReply, input.userMessage);
+  },
+};
+
+/**
  * Deterministic post-processing guard that applies prioritized text
  * transformation rules to agent replies before persistence/delivery.
  *
@@ -931,6 +1023,7 @@ export class ResponseGuardService {
     ruleSingleQuestion,
     ruleToneCleanup,
     rule7BlockPrematureHandoff,
+    ruleStripLeadingEcho,
   ];
 
   guard(input: GuardInput): GuardOutput {

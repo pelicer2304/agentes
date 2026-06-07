@@ -437,5 +437,57 @@ describe('ResponseGuardService.guard', () => {
       expect(out.reply.toLowerCase()).toMatch(/encaminh/);
     });
   });
+
+  // Feature: conversational-agent-quality — leading-echo removal.
+  describe('leading echo removal', () => {
+    it('strips a leading clause that restates the client message', () => {
+      const out = service.guard(
+        makeInput({
+          reply:
+            'Com vendas de etiquetas e problemas nos atendimentos, me conta como sua equipe lida com as mensagens hoje?',
+          userMessage:
+            'meu negocio é de vendas de etiquetas e to com problemas nos atendimentos',
+          intent: 'general',
+        }),
+      );
+
+      expect(out.reply).toBe(
+        'Me conta como sua equipe lida com as mensagens hoje?',
+      );
+      expect(out.reply.toLowerCase()).not.toContain('etiquetas');
+    });
+
+    it('leaves a reply without an echoing preamble unchanged', () => {
+      const reply = 'Como sua equipe lida com as mensagens hoje?';
+      const out = service.guard(
+        makeInput({
+          reply,
+          userMessage: 'vendas de etiquetas',
+          intent: 'general',
+        }),
+      );
+      expect(out.reply).toBe(reply);
+    });
+
+    it('does not strip a qualified contextual handoff offer', () => {
+      const reply =
+        'Com esse volume e os erros em pedido, faz sentido a equipe avaliar. Quer que eu encaminhe?';
+      const out = service.guard(
+        makeInput({
+          reply,
+          userMessage: 'recebo 200 pedidos e erros em pedido',
+          intent: 'general',
+          facts: {
+            segment: 'restaurante',
+            mainPain: 'erros em pedido',
+            knownPains: ['erros em pedido', 'demora'],
+            volume: '200 pedidos',
+          },
+        }),
+      );
+      // The handoff offer (and its contextual preamble) is preserved.
+      expect(out.reply.toLowerCase()).toMatch(/encaminh/);
+    });
+  });
 });
 

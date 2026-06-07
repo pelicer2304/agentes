@@ -602,7 +602,10 @@ describe('InboundMessageProcessor - message debounce', () => {
   it('sends a "digitando" presence when a message is buffered', async () => {
     mockConfig.typingIndicatorEnabled = true;
     await enqueue(inbound('oi', 'EXT1'), 'oi');
-    expect(mockEvolution.sendTypingOrPresence).toHaveBeenCalledWith('5511999999999');
+    expect(mockEvolution.sendTypingOrPresence).toHaveBeenCalledWith(
+      '5511999999999',
+      expect.any(Number),
+    );
     mockConfig.typingIndicatorEnabled = false;
   });
 

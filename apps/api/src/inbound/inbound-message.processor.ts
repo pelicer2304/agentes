@@ -1117,14 +1117,16 @@ export class InboundMessageProcessor {
         });
       }
 
-      // Human-like typing pause proportional to the reply length.
-      await this.simulateTyping(buffer.phone, reply);
-
+      // Human-like typing: deliver with a delay so WhatsApp shows "digitando..."
+      // for that duration before the message lands (handled natively by the
+      // channel via the delay parameter).
+      const typingMs = this.computeTypingDelay(reply);
       const sent = await this.sendReply(
         buffer.phone,
         reply,
         buffer.instanceName,
         conversationId,
+        typingMs,
       );
       if (!sent) {
         await this.recordBotEvent('evolution_error', {
@@ -1197,28 +1199,25 @@ export class InboundMessageProcessor {
       return;
     }
     try {
-      await this.evolution.sendTypingOrPresence(to);
+      await this.evolution.sendTypingOrPresence(to, this.config.messageDebounceMs);
     } catch (err) {
       this.logger.debug(`Typing presence failed: ${this.errMsg(err)}`);
     }
   }
 
   /**
-   * Re-assert the "digitando..." presence and pause for a human-like duration
-   * proportional to the reply length, clamped to [typingMinMs, typingMaxMs].
+   * Compute the human-like typing delay (ms) for a reply, proportional to its
+   * length and clamped to [typingMinMs, typingMaxMs]. Returns 0 when the typing
+   * indicator is disabled.
    */
-  private async simulateTyping(to: string, reply: string): Promise<void> {
+  private computeTypingDelay(reply: string): number {
     if (!this.config.typingIndicatorEnabled) {
-      return;
+      return 0;
     }
-    await this.sendTypingIndicator(to);
-    const ms = Math.min(
+    return Math.min(
       this.config.typingMaxMs,
       Math.max(this.config.typingMinMs, reply.length * this.config.typingMsPerChar),
     );
-    if (ms > 0) {
-      await new Promise((resolve) => setTimeout(resolve, ms));
-    }
   }
 
   /**
@@ -1723,6 +1722,7 @@ export class InboundMessageProcessor {
     content: string,
     instanceName: string | null,
     conversationId: string,
+    delayMs?: number,
   ): Promise<boolean> {
     try {
       await this.channelRegistry.get(WHATSAPP_CHANNEL).sendMessage({
@@ -1730,6 +1730,7 @@ export class InboundMessageProcessor {
         content,
         instanceName: instanceName ?? undefined,
         conversationId,
+        delayMs,
       });
       return true;
     } catch (err) {

@@ -44,6 +44,7 @@ export class EvolutionChannelAdapter implements ChannelAdapter {
     const result = await this.evolutionService.sendTextMessage(
       params.to,
       params.content,
+      params.delayMs,
     );
 
     if (!result.ok) {

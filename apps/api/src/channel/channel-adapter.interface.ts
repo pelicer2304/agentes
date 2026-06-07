@@ -15,6 +15,12 @@ export interface SendMessageParams {
   instanceName?: string;
   /** Originating conversation id, for logging/correlation. */
   conversationId?: string;
+  /**
+   * Optional typing delay (ms). When set, the channel shows the "digitando..."
+   * (composing) presence for this duration before delivering the message, to
+   * feel like a human typing.
+   */
+  delayMs?: number;
 }
 
 /**
