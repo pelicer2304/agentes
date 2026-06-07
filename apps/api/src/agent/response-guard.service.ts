@@ -3,6 +3,8 @@ import {
   GuardInput,
   GuardOutput,
   HandoffState,
+  IntentCategory,
+  KnownFacts,
 } from './conversation-types';
 
 // Re-export the consolidated contract so existing importers of these symbols
@@ -319,9 +321,110 @@ function getSegmentTemplate(segment: string | null): string {
   return SEGMENT_TEMPLATES.fallback;
 }
 
-function containsHandoffOffer(reply: string): boolean {
-  const lower = reply.toLowerCase();
-  return lower.includes('encaminhar?') || lower.includes('encaminhe?');
+function containsHandoffOfferBroad(reply: string): boolean {
+  // Broad detector for a handoff/transfer OFFER in any phrasing (not just the
+  // `encaminhar?`/`encaminhe?` punctuation forms). Catches "quer que eu
+  // encaminhe ...", "posso encaminhar ...", "passar para a equipe", etc.
+  const lower = reply
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const patterns = [
+    'encaminhar',
+    'encaminhe',
+    'encaminho',
+    'encaminhamento',
+    'passar para a equipe',
+    'passar para o time',
+    'passo para a equipe',
+    'passar pro time',
+    'falar com a equipe',
+    'falar com nosso time',
+    'falar com o time',
+    'conectar voce com',
+    'conectar voce a',
+    'chamar a equipe',
+    'acionar a equipe',
+    'nossa equipe avaliar',
+    'a equipe avaliar',
+    'equipe te passar',
+    'equipe da decodifica',
+  ];
+  return patterns.some((p) => lower.includes(p));
+}
+
+/**
+ * Whether the lead is qualified enough for the agent to OFFER a handoff. A
+ * pre-sales agent must understand the pain deeply before routing: it needs the
+ * business segment, a main pain (or at least one known pain), the pain to have
+ * been DEEPENED (a second pain mapped or the secondary-pains question asked),
+ * and the volume. Only then is an unsolicited handoff offer allowed.
+ */
+function isQualifiedForHandoffOffer(facts: KnownFacts): boolean {
+  const hasSegment = !!(facts.segment || facts.businessDescription);
+  const hasPain = !!facts.mainPain || facts.knownPains.length > 0;
+  const painDeepened = facts.knownPains.length >= 2 || facts.secondaryPainsAsked;
+  const hasVolume = !!facts.volume;
+  return hasSegment && hasPain && painDeepened && hasVolume;
+}
+
+/**
+ * Builds the contextual deepening question used to REPLACE a premature handoff
+ * offer. It steps through the discovery funnel based on what is still missing:
+ * segment -> main pain -> deepen the pain (impact / secondary pain) -> volume.
+ * Never offers a handoff and never re-asks a known fact.
+ */
+function buildDeepeningQuestion(facts: KnownFacts): string {
+  const hasSegment = !!(facts.segment || facts.businessDescription);
+  const hasPain = !!facts.mainPain || facts.knownPains.length > 0;
+  const painDeepened = facts.knownPains.length >= 2 || facts.secondaryPainsAsked;
+  const hasVolume = !!facts.volume;
+
+  if (!hasSegment) {
+    return 'Me conta qual é o seu negócio e como vocês usam o WhatsApp hoje?';
+  }
+  if (!hasPain) {
+    return 'Qual é o principal desafio que vocês enfrentam no atendimento hoje?';
+  }
+  if (!painDeepened) {
+    return secondaryPainQuestionFor(facts.segment);
+  }
+  if (!hasVolume) {
+    return 'Quantas mensagens ou pedidos vocês recebem por dia, em média?';
+  }
+  // Qualified-but-still-blocked safety net: keep understanding the impact.
+  return 'Esse ponto acontece com que frequência e qual o impacto disso no dia a dia de vocês?';
+}
+
+/**
+ * Segment-aware secondary-pain question, mirroring the agent prompt's
+ * deepening suggestions. Falls back to a generic version when the segment is
+ * unknown or unmatched.
+ */
+function secondaryPainQuestionFor(segment: string | null): string {
+  const s = (segment || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (s.includes('restaurante') || s.includes('lanchonete') || s.includes('pizzaria')) {
+    return 'Além do volume, vocês também têm erro em pedido, demora para confirmar ou perda de venda por falta de resposta?';
+  }
+  if (s.includes('loja') || s.includes('moda') || s.includes('roupa')) {
+    return 'Além disso, vocês têm dificuldade com dúvidas de produto, estoque, entrega ou clientes que somem antes de fechar?';
+  }
+  if (s.includes('clinica') || s.includes('odonto') || s.includes('medic')) {
+    return 'Além da agenda, vocês têm dúvidas repetidas, remarcações ou pacientes sem resposta fora do horário?';
+  }
+  if (s.includes('imobiliar') || s.includes('corretor')) {
+    return 'Além do volume de leads, vocês perdem contatos por demora ou têm retrabalho respondendo as mesmas dúvidas?';
+  }
+  if (s.includes('academia') || s.includes('fitness')) {
+    return 'Além disso, vocês perdem alunos por falta de resposta ou têm muitas dúvidas sobre planos e horários?';
+  }
+  if (s.includes('pet') || s.includes('veterinar')) {
+    return 'Além da agenda de banho e tosa, vocês têm dúvidas repetidas ou perda de clientes por demora?';
+  }
+  return 'Além desse ponto, existe outra dificuldade no WhatsApp hoje, como perguntas repetidas, perda de clientes ou atendimento fora do horário?';
 }
 
 /**
@@ -753,15 +856,49 @@ const ruleToneCleanup: GuardRule = {
 };
 
 const rule7BlockPrematureHandoff: GuardRule = {
-  name: 'handoff_offered_not_accepted',
+  name: 'premature_handoff_replaced',
   priority: 13,
-  type: 'metadata-only',
+  type: 'partial-transform',
   applies(input: GuardInput, currentReply: string): boolean {
-    return containsHandoffOffer(currentReply) && !handoffAcceptedOf(input);
+    // Deterministic handoff-related intents produce legitimate handoff text
+    // (explicit human request, accepting a pending offer, frustration routing,
+    // or a post-handoff ack). Their replies must pass through untouched.
+    const allowedHandoffIntents: IntentCategory[] = [
+      'preference_human',
+      'handoff_accept',
+      'frustration',
+      'handoff_completed_ack',
+    ];
+    if (allowedHandoffIntents.includes(input.intent)) return false;
+    // Price answers legitimately offer to route to the team even before full
+    // qualification, and an already-accepted/completed handoff must keep its
+    // confirmation text. Otherwise, a handoff OFFER is only allowed once the
+    // lead is qualified (segment + deepened pain + volume).
+    if (input.intent === 'price_question') return false;
+    if (handoffAcceptedOf(input)) return false;
+    if (isQualifiedForHandoffOffer(input.context.facts)) return false;
+    return containsHandoffOfferBroad(currentReply);
   },
-  apply(_input: GuardInput, currentReply: string): string {
-    // metadata-only: do not modify the reply
-    return currentReply;
+  apply(input: GuardInput, currentReply: string): string {
+    // Drop every sentence that carries the premature handoff offer, keeping any
+    // genuine answer/diagnostic content the agent produced.
+    const kept = splitSentences(currentReply).filter(
+      (sentence) => !containsHandoffOfferBroad(sentence),
+    );
+    const deepening = buildDeepeningQuestion(input.context.facts);
+    const remainder = kept.join('').replace(/\s{2,}/g, ' ').trim();
+
+    // If nothing meaningful survives, or the remainder is just filler, lead the
+    // conversation deeper instead of offering a handoff.
+    if (remainder.length < 20) {
+      return deepening;
+    }
+    // If what remains already ends with a question, don't append a second one
+    // (single-question shaping runs after this rule, but keep it clean here).
+    if (remainder.includes('?')) {
+      return remainder;
+    }
+    return `${remainder} ${deepening}`.replace(/\s{2,}/g, ' ').trim();
   },
 };
 

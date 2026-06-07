@@ -123,6 +123,14 @@ export interface HandoffDecisionInput {
   hasSegment: boolean;
   hasAtLeastOnePain: boolean;
   userAbandoned: boolean; //      desistance
+  /**
+   * Whether the lead is qualified enough for an UNSOLICITED handoff offer
+   * (segment + deepened pain + volume). When provided, it gates the
+   * `none -> suggested` transition (R10.2). When omitted, the manager falls
+   * back to the legacy `hasSegment && hasAtLeastOnePain` condition so existing
+   * callers/tests keep their behavior.
+   */
+  qualificationReadyForOffer?: boolean;
 }
 
 /**

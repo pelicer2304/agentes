@@ -361,4 +361,81 @@ describe('ResponseGuardService.guard', () => {
       { numRuns: 100 },
     );
   });
+
+  // Feature: conversational-agent-quality — premature handoff offer suppression.
+  describe('premature handoff offer suppression', () => {
+    // Facts that DO qualify the lead for an unsolicited handoff offer:
+    // segment + main pain + deepened pain (2+ known pains) + volume.
+    const qualifiedFacts: Partial<KnownFacts> = {
+      segment: 'restaurante',
+      mainPain: 'demora para responder no pico',
+      knownPains: ['demora para responder', 'erro em pedido'],
+      volume: '200 mensagens por dia',
+    };
+
+    it('strips a handoff offer when the lead is NOT yet qualified (general intent)', () => {
+      const reply =
+        'Com o gargalo, a equipe fica sobrecarregada. Quer que eu encaminhe para nossa equipe avaliar uma solução?';
+      const out = service.guard(
+        makeInput({
+          reply,
+          intent: 'general',
+          handoffState: 'none',
+          facts: { mainPain: 'gargalo na operação' }, // no segment, no volume, not deepened
+        }),
+      );
+
+      expect(out.reply.toLowerCase()).not.toMatch(/encaminh/);
+      expect(out.reply.toLowerCase()).not.toContain('nossa equipe avaliar');
+      // It must lead the conversation deeper instead.
+      expect(out.reply).toMatch(/\?/);
+      expect(out.changed).toBe(true);
+    });
+
+    it('keeps the handoff offer once the lead IS qualified', () => {
+      const reply =
+        'Com esse volume e os erros em pedido, faz sentido a equipe avaliar. Quer que eu encaminhe?';
+      const out = service.guard(
+        makeInput({
+          reply,
+          intent: 'general',
+          handoffState: 'none',
+          facts: qualifiedFacts,
+        }),
+      );
+
+      expect(out.reply.toLowerCase()).toMatch(/encaminh/);
+    });
+
+    it('keeps the handoff confirmation for an explicit human request (preference_human)', () => {
+      const reply =
+        'Perfeito, vou encaminhar você para o nosso time agora mesmo. Em breve alguém entra em contato.';
+      const out = service.guard(
+        makeInput({
+          reply,
+          intent: 'preference_human',
+          handoffState: 'none',
+          facts: {}, // not qualified, but the user explicitly asked for a human
+        }),
+      );
+
+      expect(out.reply.toLowerCase()).toMatch(/encaminh/);
+    });
+
+    it('does not strip a handoff offer inside a price answer', () => {
+      const reply =
+        'O valor depende do escopo. Posso encaminhar para a equipe te dar uma estimativa direta.';
+      const out = service.guard(
+        makeInput({
+          reply,
+          intent: 'price_question',
+          handoffState: 'none',
+          facts: {},
+        }),
+      );
+
+      expect(out.reply.toLowerCase()).toMatch(/encaminh/);
+    });
+  });
 });
+

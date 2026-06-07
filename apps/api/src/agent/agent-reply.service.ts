@@ -328,14 +328,35 @@ export class AgentReplyService {
 
     const questionCount = Math.floor(facts.messageCount / 2);
 
-    // Determine what the agent should do next
+    // Discovery state. A pre-sales agent must UNDERSTAND the pain deeply before
+    // ever offering a handoff: segment + main pain + the pain's impact (a
+    // secondary pain or explicit impact counts) + volume. Only then is the lead
+    // "qualified" enough to suggest routing to the team.
+    const hasSegment = !!(facts.segment || facts.businessDescription);
+    const hasPain = !!facts.mainPain || facts.knownPains.length > 0;
+    const painDeepened = facts.knownPains.length >= 2 || facts.secondaryPainsAsked;
+    const hasVolume = !!facts.volume;
+    const qualified = hasSegment && hasPain && painDeepened && hasVolume;
+
+    // Determine what the agent should do next — dig deeper before offering.
     let nextActionNote = '';
-    if (questionCount >= 5) {
-      nextActionNote = '\nATENÇÃO: Já fez 5+ perguntas. NÃO faça mais perguntas. Ofereça encaminhar para a equipe contextualizando o motivo.';
-    } else if (facts.mainPain && !facts.secondaryPainsAsked && facts.knownPains.length < 2) {
-      nextActionNote = `\nPRÓXIMO PASSO: Pergunte sobre dores secundárias UMA VEZ, contextualizada ao nicho:\n${this.buildSecondaryPainQuestion(facts)}`;
-    } else if (facts.mainPain && facts.volume && facts.knownPains.length >= 1 && questionCount >= 3) {
-      nextActionNote = '\nPRÓXIMO PASSO: Já tem dor + volume. Ofereça encaminhamento CONTEXTUALIZADO: resuma o cenário do cliente e pergunte se quer que encaminhe. NUNCA responda apenas "Posso encaminhar?" isolado.';
+    if (qualified && questionCount >= 4) {
+      nextActionNote =
+        '\nPRÓXIMO PASSO: Você já entende o cenário (negócio, dor, impacto e volume). Resuma o cenário do cliente em 1 frase e ENTÃO ofereça encaminhar para a equipe. NUNCA ofereça "Posso encaminhar?" isolado.';
+    } else if (!hasSegment) {
+      nextActionNote = '\nPRÓXIMO PASSO: Descubra o segmento/negócio do cliente.';
+    } else if (!hasPain) {
+      nextActionNote =
+        '\nPRÓXIMO PASSO: Descubra a PRINCIPAL dor/dificuldade do cliente no atendimento. Ainda NÃO ofereça encaminhamento.';
+    } else if (!painDeepened) {
+      nextActionNote =
+        `\nPRÓXIMO PASSO: APROFUNDE a dor. Pergunte sobre o IMPACTO real dela no negócio (perda de venda, tempo perdido, clientes sem resposta, retrabalho) OU sobre uma dor secundária. NÃO ofereça encaminhamento ainda.\nSugestão contextual: ${this.buildSecondaryPainQuestion(facts)}`;
+    } else if (!hasVolume) {
+      nextActionNote =
+        '\nPRÓXIMO PASSO: Já tem a dor e o impacto. Pergunte o volume (mensagens/pedidos por dia) para dimensionar. NÃO ofereça encaminhamento ainda.';
+    } else {
+      nextActionNote =
+        '\nPRÓXIMO PASSO: Continue entendendo o impacto da dor (frequência, consequência, o que já tentaram). Só ofereça encaminhamento quando o cenário estiver claro. NÃO ofereça agora.';
     }
 
     // Do-not-re-offer block derived from the SaidRecord (R6.3 / R6.4 / R2.4).

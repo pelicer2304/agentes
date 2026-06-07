@@ -247,6 +247,17 @@ export class ConversationService {
     const preference = detectPreference(rawContent);
     const effectiveHandoffIntent: IntentCategory =
       intent === 'frustration' ? 'preference_human' : intent;
+    // The lead is "ready for an unsolicited handoff offer" only once the pain
+    // has been understood deeply: segment + a pain + the pain deepened (a
+    // second pain mapped or the secondary-pains question already asked) +
+    // volume. This keeps the agent from offering a transfer too early.
+    const painDeepened =
+      facts.knownPains.length >= 2 || facts.secondaryPainsAsked;
+    const qualificationReadyForOffer =
+      !!(facts.segment || facts.businessDescription) &&
+      (!!facts.mainPain || facts.knownPains.length > 0) &&
+      painDeepened &&
+      !!facts.volume;
     const handoffDecision = this.handoffManager.resolve({
       current: handoffState,
       preference,
@@ -254,6 +265,7 @@ export class ConversationService {
       hasSegment: !!(facts.segment || facts.businessDescription),
       hasAtLeastOnePain: !!facts.mainPain || facts.knownPains.length > 0,
       userAbandoned: intent === 'desistance',
+      qualificationReadyForOffer,
     });
     const nextHandoffState = handoffDecision.next;
 

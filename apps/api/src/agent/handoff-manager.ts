@@ -96,10 +96,15 @@ export class HandoffManagerService {
       return this.toAccepted(current);
     }
 
-    // 5. Unsolicited offer gate: only suggest a handoff once the lead has a
-    //    business segment and at least one pain.
+    // 5. Unsolicited offer gate: only suggest a handoff once the lead is
+    //    qualified. When the caller supplies `qualificationReadyForOffer` we
+    //    use it (segment + deepened pain + volume); otherwise we fall back to
+    //    the legacy "segment + at least one pain" condition.
+    const readyForOffer =
+      input.qualificationReadyForOffer ??
+      (input.hasSegment && input.hasAtLeastOnePain);
     let derived: HandoffState = current;
-    if (current === 'none' && input.hasSegment && input.hasAtLeastOnePain) {
+    if (current === 'none' && readyForOffer) {
       derived = 'suggested';
     }
 
