@@ -79,7 +79,18 @@ export class AgentAnalysisService {
       const leadUpdate: Record<string, unknown> = {};
       if (analysis.leadScore > 0) leadUpdate.leadScore = analysis.leadScore;
       if (analysis.temperature) leadUpdate.temperature = analysis.temperature;
-      if (analysis.status && analysis.status !== 'novo') leadUpdate.status = analysis.status;
+      // The background analysis MUST NOT escalate the lead to a human handoff.
+      // Handoff is owned exclusively by the deterministic pipeline (an explicit
+      // user request or an accepted offer). If the analysis LLM were allowed to
+      // write `chamar_humano`, the next turn would read `lead.status` as an
+      // accepted handoff and — with BOT_PAUSE_ON_HANDOFF — silence the bot,
+      // i.e. "transfer out of nowhere". So we never persist `chamar_humano`
+      // here; a hot lead is recorded as `quente` instead.
+      if (analysis.status && analysis.status !== 'novo' && analysis.status !== 'chamar_humano') {
+        leadUpdate.status = analysis.status;
+      } else if (analysis.status === 'chamar_humano') {
+        leadUpdate.status = 'quente';
+      }
       if (analysis.detectedSegment) leadUpdate.segment = analysis.detectedSegment;
       if (analysis.primaryPain) leadUpdate.mainPain = analysis.primaryPain;
       if (analysis.recommendedService) leadUpdate.recommendedService = analysis.recommendedService;
@@ -95,13 +106,15 @@ export class AgentAnalysisService {
         await this.prisma.lead.update({ where: { id: leadId }, data: leadUpdate });
       }
 
-      // Update conversation stage
+      // Update conversation stage. NOTE: `handoffRequired` is intentionally NOT
+      // driven by the analysis — the deterministic pipeline owns the handoff
+      // lifecycle. Letting the analysis force it here caused premature, unsolicited
+      // transfers (and bot pausing) based purely on the LLM's opinion.
       await this.prisma.conversation.update({
         where: { id: conversationId },
         data: {
           stage: currentStage,
           lastIntent: analysis.detectedIntent,
-          handoffRequired: analysis.status === 'chamar_humano',
         },
       });
     } catch (error) {
