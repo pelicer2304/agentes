@@ -77,9 +77,9 @@ describe('HealthService', () => {
     expect(result.evolutionConfigured).toBe(false);
   });
 
-  it('uses the openrouter key when provider is openrouter', async () => {
+  it('reports llmConfigured false when no LLM key is set', async () => {
     const service = await buildService({
-      config: { llmProvider: 'openrouter', openrouterApiKey: null },
+      config: { llmProvider: 'openrouter', openaiApiKey: '' as unknown as string },
     });
 
     const result = await service.check();
@@ -87,9 +87,9 @@ describe('HealthService', () => {
     expect(result.llmConfigured).toBe(false);
   });
 
-  it('uses the openai key when provider is not openrouter', async () => {
+  it('reports llmConfigured true when the LLM key is present', async () => {
     const service = await buildService({
-      config: { llmProvider: 'openai', openrouterApiKey: null, openaiApiKey: 'oa-key' },
+      config: { llmProvider: 'openai', openaiApiKey: 'oa-key' },
     });
 
     const result = await service.check();

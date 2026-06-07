@@ -23,12 +23,29 @@ export class AppConfigService {
     return this.configService.get<string>('OPENROUTER_BASE_URL') || null;
   }
 
+  /**
+   * The LLM API key. The frozen engine uses OpenAIProviderService for both
+   * "openai" and "openrouter", so this prefers OPENAI_API_KEY and falls back to
+   * OPENROUTER_API_KEY (accepted as an alias).
+   */
   get openaiApiKey(): string {
-    return this.configService.get<string>('OPENAI_API_KEY')!;
+    return (
+      this.configService.get<string>('OPENAI_API_KEY') ||
+      this.configService.get<string>('OPENROUTER_API_KEY') ||
+      ''
+    );
   }
 
+  /**
+   * The OpenAI-compatible base URL. Prefers OPENAI_BASE_URL and falls back to
+   * OPENROUTER_BASE_URL (e.g. https://openrouter.ai/api/v1).
+   */
   get openaiBaseUrl(): string | null {
-    return this.configService.get<string>('OPENAI_BASE_URL') || null;
+    return (
+      this.configService.get<string>('OPENAI_BASE_URL') ||
+      this.configService.get<string>('OPENROUTER_BASE_URL') ||
+      null
+    );
   }
 
   get modelFallback(): string {

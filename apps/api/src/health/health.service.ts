@@ -56,13 +56,11 @@ export class HealthService {
   }
 
   /**
-   * Derived from the presence of the provider-specific LLM key without exposing
-   * its value.
+   * Derived from the presence of the LLM key the engine actually uses. The
+   * frozen OpenAIProviderService reads `openaiApiKey` for both providers
+   * (which itself falls back to OPENROUTER_API_KEY).
    */
   private isLlmConfigured(): boolean {
-    if (this.config.llmProvider === 'openrouter') {
-      return this.hasValue(this.config.openrouterApiKey);
-    }
     return this.hasValue(this.config.openaiApiKey);
   }
 

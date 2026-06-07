@@ -142,10 +142,13 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-please-set-a-strong-jwt-secret-32+}
 
       # --- LLM provider configuration ---
+      # The engine uses OpenAIProviderService for both providers, reading
+      # OPENAI_API_KEY / OPENAI_BASE_URL (OPENROUTER_* accepted as aliases).
       LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MODEL_NAME: ${MODEL_NAME:-gpt-4o-mini}
       LLM_MODEL_FALLBACK: ${LLM_MODEL_FALLBACK:-google/gemini-2.5-flash}
 

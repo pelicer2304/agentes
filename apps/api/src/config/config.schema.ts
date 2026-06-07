@@ -16,25 +16,21 @@ export const configValidationSchema = Joi.object({
       'any.only': `LLM_PROVIDER must be one of the supported providers: ${SUPPORTED_LLM_PROVIDERS.join(', ')}. Received "{{#value}}".`,
     }),
 
-  OPENROUTER_API_KEY: Joi.string()
-    .when('LLM_PROVIDER', { is: 'openrouter', then: Joi.required() })
-    .messages({
-      'any.required':
-        'OPENROUTER_API_KEY is required when LLM_PROVIDER is "openrouter". Provide your OpenRouter API key.',
-      'string.empty': 'OPENROUTER_API_KEY cannot be empty.',
-    }),
+  OPENROUTER_API_KEY: Joi.string().messages({
+    'string.empty': 'OPENROUTER_API_KEY cannot be empty.',
+  }),
 
   OPENROUTER_BASE_URL: Joi.string().uri().optional().messages({
     'string.uri': 'OPENROUTER_BASE_URL must be a valid URI.',
   }),
 
-  OPENAI_API_KEY: Joi.string()
-    .when('LLM_PROVIDER', { is: 'openai', then: Joi.required() })
-    .messages({
-      'any.required':
-        'OPENAI_API_KEY is required when LLM_PROVIDER is "openai". Provide your OpenAI API key.',
-      'string.empty': 'OPENAI_API_KEY cannot be empty.',
-    }),
+  OPENAI_API_KEY: Joi.string().messages({
+    'string.empty': 'OPENAI_API_KEY cannot be empty.',
+  }),
+
+  OPENAI_BASE_URL: Joi.string().uri().optional().messages({
+    'string.uri': 'OPENAI_BASE_URL must be a valid URI.',
+  }),
 
   MODEL_NAME: Joi.string().default('gpt-4o-mini'),
 
@@ -128,4 +124,13 @@ export const configValidationSchema = Joi.object({
     'any.required': 'FRONTEND_URL is required. Set it to the frontend origin for CORS.',
     'string.empty': 'FRONTEND_URL cannot be empty.',
   }),
-});
+})
+  // The frozen engine uses OpenAIProviderService for BOTH "openai" and
+  // "openrouter" (it reads OPENAI_API_KEY / OPENAI_BASE_URL). So at least one
+  // LLM key must be provided; OPENAI_API_KEY is preferred and OPENROUTER_API_KEY
+  // is accepted as an alias (see AppConfigService.openaiApiKey).
+  .or('OPENAI_API_KEY', 'OPENROUTER_API_KEY')
+  .messages({
+    'object.missing':
+      'An LLM API key is required: set OPENAI_API_KEY (used for both "openai" and "openrouter" providers) or OPENROUTER_API_KEY.',
+  });
