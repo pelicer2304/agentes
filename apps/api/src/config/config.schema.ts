@@ -16,19 +16,15 @@ export const configValidationSchema = Joi.object({
       'any.only': `LLM_PROVIDER must be one of the supported providers: ${SUPPORTED_LLM_PROVIDERS.join(', ')}. Received "{{#value}}".`,
     }),
 
-  OPENROUTER_API_KEY: Joi.string().messages({
-    'string.empty': 'OPENROUTER_API_KEY cannot be empty.',
-  }),
+  OPENROUTER_API_KEY: Joi.string().allow('').optional(),
 
-  OPENROUTER_BASE_URL: Joi.string().uri().optional().messages({
+  OPENROUTER_BASE_URL: Joi.string().uri().allow('').optional().messages({
     'string.uri': 'OPENROUTER_BASE_URL must be a valid URI.',
   }),
 
-  OPENAI_API_KEY: Joi.string().messages({
-    'string.empty': 'OPENAI_API_KEY cannot be empty.',
-  }),
+  OPENAI_API_KEY: Joi.string().allow('').optional(),
 
-  OPENAI_BASE_URL: Joi.string().uri().optional().messages({
+  OPENAI_BASE_URL: Joi.string().uri().allow('').optional().messages({
     'string.uri': 'OPENAI_BASE_URL must be a valid URI.',
   }),
 
