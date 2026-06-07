@@ -68,11 +68,23 @@ export class FactExtractorService {
   }
 
   private extractSegment(history: ConversationMessage[]): string | null {
-    // Look for business mentions in user messages
+    // 1) Direct keyword match against common business segments.
     const businessKeywords = [
-      'clínica', 'clinica', 'loja', 'restaurante', 'academia', 'escola',
-      'escritório', 'escritorio', 'imobiliária', 'imobiliaria', 'pet shop',
-      'consultoria', 'fábrica', 'fabrica', 'e-commerce', 'ecommerce',
+      'clínica', 'clinica', 'loja', 'restaurante', 'lanchonete', 'pizzaria',
+      'academia', 'fitness', 'escola', 'curso', 'escritório', 'escritorio',
+      'imobiliária', 'imobiliaria', 'corretor', 'pet shop', 'petshop', 'pet',
+      'veterinár', 'veterinar', 'consultoria', 'contabil', 'contábil',
+      'fábrica', 'fabrica', 'e-commerce', 'ecommerce', 'etiqueta',
+      // Automotive
+      'carro', 'carros', 'veículo', 'veiculo', 'veículos', 'veiculos',
+      'automóvel', 'automovel', 'automóveis', 'automoveis', 'concessionária',
+      'concessionaria', 'revenda', 'autopeça', 'autopeças', 'autopeca',
+      'oficina', 'mecânica', 'mecanica', 'seminovos',
+      // Other common ones
+      'salão', 'salao', 'barbearia', 'estética', 'estetica', 'farmácia',
+      'farmacia', 'mercado', 'distribuidora', 'atacado', 'varejo',
+      'moda', 'roupa', 'roupas', 'calçado', 'calcados', 'joalheria',
+      'advocacia', 'advogad', 'odonto', 'dentista', 'hotel', 'pousada',
     ];
     for (const msg of history) {
       if (msg.role !== 'user') continue;
@@ -81,7 +93,49 @@ export class FactExtractorService {
         if (lower.includes(kw)) return kw;
       }
     }
+
+    // 2) Pattern capture: "vendo X", "venda de X", "trabalho com X",
+    //    "negócio de X", "loja de X", "tenho uma X", etc. Captures the noun
+    //    phrase the user used to describe their business even when it is not in
+    //    the keyword list above (e.g. "venda de carros").
+    const patterns: RegExp[] = [
+      /\bvend[ae]s?\s+de\s+([a-zà-ú][a-zà-ú\s]{2,30})/i,
+      /\bvend[oe]\s+([a-zà-ú][a-zà-ú\s]{2,30})/i,
+      /\btrabalh[oa]\s+com\s+([a-zà-ú][a-zà-ú\s]{2,30})/i,
+      /\b(?:neg[óo]cio|ramo|setor|área|area)\s+(?:de\s+|é\s+(?:de\s+)?)?([a-zà-ú][a-zà-ú\s]{2,30})/i,
+      /\b(?:loja|empresa|f[áa]brica|revenda|com[ée]rcio|oficina|concession[áa]ria|distribuidora)\s+de\s+([a-zà-ú][a-zà-ú\s]{2,30})/i,
+      /\btenho\s+(?:uma|um)\s+([a-zà-ú][a-zà-ú\s]{2,30})/i,
+    ];
+    for (const msg of history) {
+      if (msg.role !== 'user') continue;
+      for (const re of patterns) {
+        const match = msg.content.match(re);
+        if (match && match[1]) {
+          const cleaned = this.cleanSegmentPhrase(match[1]);
+          if (cleaned) return cleaned;
+        }
+      }
+    }
     return null;
+  }
+
+  /**
+   * Clean a captured segment phrase: lowercase, cut at the first connector
+   * (e, mas, porque, que, para, ...) or punctuation, trim, and bound the
+   * length. Returns null when nothing meaningful remains.
+   */
+  private cleanSegmentPhrase(raw: string): string | null {
+    let phrase = raw
+      .toLowerCase()
+      .split(/[,.;:!?]/)[0]
+      .split(/\s+(?:e|mas|porque|por que|que|para|pra|pois|com|sem|onde|quando)\s+/)[0]
+      .trim();
+    if (phrase.length > 30) {
+      phrase = phrase.slice(0, 30).trim();
+    }
+    // Reject obviously empty / filler captures.
+    if (phrase.length < 3) return null;
+    return phrase;
   }
 
   private extractWhatsappUsage(history: ConversationMessage[]): string | null {
@@ -219,8 +273,9 @@ export class FactExtractorService {
    */
   private checkSecondaryPainsAsked(history: ConversationMessage[]): boolean {
     const phrases = [
-      'além desse ponto', 'além dessa dor', 'outras dificuldades',
-      'mais alguma dificuldade', 'outros problemas', 'perguntas repetidas, perda',
+      'além d', 'alem d', // "além do/da/de/desse/dessa ..." — deepening openers
+      'outras dificuldades', 'mais alguma dificuldade', 'outros problemas',
+      'outras dores', 'mais algum ponto', 'perguntas repetidas, perda',
       'demora para responder, perguntas repetidas',
     ];
     return history.some(

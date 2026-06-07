@@ -445,6 +445,9 @@ JSON:
     if (segment.includes('imobiliár') || segment.includes('imobiliar') || segment.includes('corretor')) {
       return '"Além do volume de leads, vocês também perdem contatos por demora, têm dificuldade para filtrar perfil ou retrabalho respondendo as mesmas dúvidas?"';
     }
+    if (segment.includes('carro') || segment.includes('veícul') || segment.includes('veicul') || segment.includes('automó') || segment.includes('automo') || segment.includes('concession') || segment.includes('oficina') || segment.includes('seminovo')) {
+      return '"Além do pós-venda, vocês também têm dúvidas repetidas sobre revisão, agendamento, peças, financiamento ou clientes que somem depois da compra?"';
+    }
     // Generic fallback
     return '"Além desse ponto, existe mais alguma dificuldade no WhatsApp hoje, como perguntas repetidas, perda de clientes, falta de organização ou atendimento fora do horário?"';
   }

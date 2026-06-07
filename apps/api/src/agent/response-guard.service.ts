@@ -418,6 +418,9 @@ function secondaryPainQuestionFor(segment: string | null): string {
   if (s.includes('imobiliar') || s.includes('corretor')) {
     return 'Além do volume de leads, vocês perdem contatos por demora ou têm retrabalho respondendo as mesmas dúvidas?';
   }
+  if (s.includes('carro') || s.includes('veicul') || s.includes('automo') || s.includes('concession') || s.includes('oficina') || s.includes('seminovo')) {
+    return 'Além do pós-venda, vocês têm dúvidas repetidas sobre revisão, agendamento, peças ou clientes que somem depois da compra?';
+  }
   if (s.includes('academia') || s.includes('fitness')) {
     return 'Além disso, vocês perdem alunos por falta de resposta ou têm muitas dúvidas sobre planos e horários?';
   }
