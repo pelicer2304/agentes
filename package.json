@@ -1,0 +1,21 @@
+{
+  "name": "assistente-decodifica-playground",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Assistente Decodifica Playground - AI-powered WhatsApp conversation simulator",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev -w apps/api",
+    "dev:web": "npm run dev -w apps/web",
+    "build:api": "npm run build -w apps/api",
+    "build:web": "npm run build -w apps/web",
+    "test:api": "npm run test -w apps/api",
+    "test:web": "npm run test -w apps/web"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

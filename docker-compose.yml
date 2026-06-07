@@ -1,0 +1,191 @@
+# Docker Compose for the WhatsApp + Evolution production deployment (EasyPanel).
+#
+# Services:
+#   - postgres      : PostgreSQL 16. Hosts TWO databases on one instance:
+#                     `decodifica` (this app, Prisma-managed) and `evolution`
+#                     (the WhatsApp gateway, created by infra/postgres/init).
+#   - redis         : Shared cache used by the Evolution API (and available to
+#                     the app's rate limiter when REDIS_URL is set).
+#   - evolution-api : Evolution API WhatsApp gateway. Its GLOBAL webhook posts
+#                     inbound events to the app at http://api:3001/webhooks/evolution.
+#   - api           : NestJS API. Runs `prisma migrate deploy` on start, then
+#                     boots. Talks to Evolution over the internal network at
+#                     http://evolution-api:8080. Listens on 3001.
+#   - web           : Built React (Vite) frontend served as static files on 3000.
+#
+# Provide secrets/config via a root-level .env file (copy from .env.example).
+# On EasyPanel, set these as service environment variables instead.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-decodifica}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Runs only on first init of the volume; creates the `evolution` database.
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-decodifica}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  evolution-api:
+    image: evoapicloud/evolution-api:latest
+    restart: unless-stopped
+    # Port is managed by EasyPanel (map a domain to container port 8080).
+    environment:
+      # Server
+      SERVER_TYPE: http
+      SERVER_PORT: 8080
+      # Public URL of the Evolution instance (its own EasyPanel domain).
+      SERVER_URL: ${EVOLUTION_PUBLIC_URL}
+      CORS_ORIGIN: "*"
+      CORS_METHODS: "POST,GET,PUT,DELETE"
+      CORS_CREDENTIALS: "true"
+
+      # Database (dedicated `evolution` database on the shared postgres)
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+
+      # Redis (shared)
+      REDIS_ENABLED: "true"
+      REDIS_URI: redis://redis:6379
+      REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+
+      # Authentication (same API key the app uses to call Evolution)
+      AUTHENTICATION_TYPE: apikey
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+
+      # QR code
+      QRCODE_LIMIT: 30
+      QRCODE_COLOR: "#198754"
+
+      # Global webhook -> points at THIS app's webhook endpoint (internal network).
+      WEBHOOK_GLOBAL_ENABLED: "true"
+      WEBHOOK_GLOBAL_URL: "http://api:3001/webhooks/evolution"
+      WEBHOOK_EVENTS_QRCODE_UPDATED: "true"
+      WEBHOOK_EVENTS_MESSAGES_UPSERT: "true"
+      WEBHOOK_EVENTS_SEND_MESSAGE: "true"
+      WEBHOOK_EVENTS_CONNECTION_UPDATE: "true"
+
+      LOG_LEVEL: "ERROR,WARN,INFO"
+      LOG_COLOR: "true"
+    volumes:
+      - evolution_instances:/evolution/instances
+      - evolution_store:/evolution/store
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      evolution-api:
+        condition: service_healthy
+    # The api Dockerfile CMD runs `prisma migrate deploy` and then starts the app.
+    environment:
+      # Database connection (the `decodifica` database on the shared postgres).
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-decodifica}?schema=public}
+
+      # Optional Redis for the per-phone rate limiter (in-memory fallback if unset).
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+
+      # Runtime environment
+      APP_ENV: ${APP_ENV:-production}
+      FRONTEND_URL: ${FRONTEND_URL}
+      PUBLIC_API_URL: ${PUBLIC_API_URL}
+
+      # Auth
+      JWT_SECRET: ${JWT_SECRET}
+
+      # LLM provider configuration
+      LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-gpt-4o-mini}
+      LLM_MODEL_FALLBACK: ${LLM_MODEL_FALLBACK:-google/gemini-2.5-flash}
+
+      # Evolution API (internal service URL; key shared with the gateway above)
+      EVOLUTION_API_URL: ${EVOLUTION_API_URL:-http://evolution-api:8080}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      EVOLUTION_INSTANCE_NAME: ${EVOLUTION_INSTANCE_NAME:-decodifica}
+      EVOLUTION_WEBHOOK_SECRET: ${EVOLUTION_WEBHOOK_SECRET:-}
+
+      # Bot behavior toggles
+      BOT_AUTO_REPLY_ENABLED: ${BOT_AUTO_REPLY_ENABLED:-true}
+      BOT_PAUSE_ON_HANDOFF: ${BOT_PAUSE_ON_HANDOFF:-true}
+      ADMIN_WHATSAPP_NUMBERS: ${ADMIN_WHATSAPP_NUMBERS:-}
+
+      # Pricing configuration
+      PRICING_RANGE_ENABLED: ${PRICING_RANGE_ENABLED:-true}
+      PRICING_STARTING_AT: ${PRICING_STARTING_AT:-2500}
+      PRICING_TEXT: ${PRICING_TEXT:-}
+    ports:
+      - "${API_PORT:-3001}:3001"
+    # The API exposes GET /health (returns { status, database, evolutionConfigured,
+    # llmConfigured }). The base image is node:20-alpine (busybox wget available).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+volumes:
+  postgres_data:
+  redis_data:
+  evolution_instances:
+  evolution_store:

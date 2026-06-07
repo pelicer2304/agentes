@@ -1,0 +1,200 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Lead {
+  id                  String   @id @default(uuid()) @db.Uuid
+  name                String   @db.VarChar(200)
+  phone               String   @db.VarChar(20)
+  email               String?  @db.VarChar(254)
+  companyName         String?  @map("company_name") @db.VarChar(200)
+  segment             String?  @db.VarChar(100)
+  businessDescription String?  @map("business_description") @db.VarChar(2000)
+  whatsappUsage       String?  @map("whatsapp_usage") @db.VarChar(500)
+  mainPain            String?  @map("main_pain") @db.VarChar(1000)
+  secondaryPains      Json?    @map("secondary_pains") @db.JsonB
+  desiredOutcome      String?  @map("desired_outcome") @db.VarChar(1000)
+  estimatedVolume     String?  @map("estimated_volume") @db.VarChar(100)
+  urgency             String?  @db.VarChar(50)
+  decisionRole        String?  @map("decision_role") @db.VarChar(100)
+  budgetSignal        String?  @map("budget_signal") @db.VarChar(500)
+  objections          Json?    @db.JsonB
+  recommendedService  String?  @map("recommended_service") @db.VarChar(200)
+  leadScore           Int?     @map("lead_score") @db.SmallInt
+  temperature         String?  @db.VarChar(20)
+  status              String   @db.VarChar(50)
+  summary             String?  @db.VarChar(5000)
+  nextStep            String?  @map("next_step") @db.VarChar(1000)
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  conversations Conversation[]
+  agentAnalyses AgentAnalysis[]
+
+  @@map("leads")
+}
+
+model Conversation {
+  id              String   @id @default(uuid()) @db.Uuid
+  leadId          String   @map("lead_id") @db.Uuid
+  channel         String   @db.VarChar(50)
+  stage           String   @db.VarChar(50)
+  status          String   @db.VarChar(50)
+  lastIntent      String?  @map("last_intent") @db.VarChar(100)
+  handoffRequired Boolean  @default(false) @map("handoff_required")
+  handoffReason   String?  @map("handoff_reason") @db.VarChar(500)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  instanceName     String?   @map("instance_name") @db.VarChar(100)
+  externalChatId   String?   @map("external_chat_id") @db.VarChar(100)
+  botPaused        Boolean   @default(false) @map("bot_paused")
+  assignedTo       String?   @map("assigned_to") @db.Uuid
+  handoffOffered   Boolean   @default(false) @map("handoff_offered")
+  handoffAccepted  Boolean   @default(false) @map("handoff_accepted")
+  handoffCompleted Boolean   @default(false) @map("handoff_completed")
+  lastInboundAt    DateTime? @map("last_inbound_at")
+  lastOutboundAt   DateTime? @map("last_outbound_at")
+
+  lead          Lead            @relation(fields: [leadId], references: [id])
+  messages      Message[]
+  agentAnalyses AgentAnalysis[]
+  assignee      User?           @relation(fields: [assignedTo], references: [id])
+  botEvents     BotEvent[]
+
+  @@index([channel, instanceName, status])
+  @@map("conversations")
+}
+
+model Message {
+  id             String   @id @default(uuid()) @db.Uuid
+  conversationId String   @map("conversation_id") @db.Uuid
+  role           String   @db.VarChar(50)
+  direction      String   @db.VarChar(20)
+  content        String   @db.VarChar(10000)
+  metadata       Json?    @db.JsonB
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  externalMessageId String? @map("external_message_id") @db.VarChar(128)
+  externalChatId    String? @map("external_chat_id") @db.VarChar(100)
+  instanceName      String? @map("instance_name") @db.VarChar(100)
+  messageType       String? @map("message_type") @db.VarChar(20)
+  rawPayload        Json?   @map("raw_payload") @db.JsonB
+  deliveryStatus    String? @map("delivery_status") @db.VarChar(20)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+
+  @@unique([externalMessageId, instanceName], name: "uq_message_idempotency")
+  @@index([externalMessageId, instanceName])
+  @@map("messages")
+}
+
+model AgentAnalysis {
+  id                 String   @id @default(uuid()) @db.Uuid
+  conversationId     String   @map("conversation_id") @db.Uuid
+  leadId             String   @map("lead_id") @db.Uuid
+  detectedSegment    String?  @map("detected_segment") @db.VarChar(100)
+  detectedIntent     String?  @map("detected_intent") @db.VarChar(100)
+  mainPain           String?  @map("main_pain") @db.VarChar(1000)
+  recommendedService String?  @map("recommended_service") @db.VarChar(200)
+  score              Int?     @db.SmallInt
+  temperature        String?  @db.VarChar(20)
+  status             String?  @db.VarChar(50)
+  shouldHandoff      Boolean? @map("should_handoff")
+  handoffReason      String?  @map("handoff_reason") @db.VarChar(500)
+  commercialSummary  String?  @map("commercial_summary") @db.VarChar(5000)
+  nextBestQuestion   String?  @map("next_best_question") @db.VarChar(1000)
+  scoreReasons       Json?    @map("score_reasons") @db.JsonB
+  rawJson            Json?    @map("raw_json") @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  lead         Lead         @relation(fields: [leadId], references: [id])
+
+  @@map("agent_analyses")
+}
+
+model KnowledgeBase {
+  id        String   @id @default(uuid()) @db.Uuid
+  category  String   @db.VarChar(50)
+  title     String   @db.VarChar(100)
+  content   String   @db.VarChar(5000)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("knowledge_base")
+}
+
+model AgentSettings {
+  id              String   @id @default(uuid()) @db.Uuid
+  agentName       String   @map("agent_name") @db.VarChar(100)
+  initialMessage  String   @map("initial_message") @db.VarChar(500)
+  toneOfVoice     String?  @map("tone_of_voice") @db.VarChar(300)
+  services        Json?    @db.JsonB
+  doNotPromise    Json?    @map("do_not_promise") @db.JsonB
+  handoffCriteria Json?    @map("handoff_criteria") @db.JsonB
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("agent_settings")
+}
+
+model WebhookLog {
+  id                String   @id @default(uuid()) @db.Uuid
+  provider          String   @db.VarChar(50)
+  instanceName      String?  @map("instance_name") @db.VarChar(100)
+  eventType         String?  @map("event_type") @db.VarChar(100)
+  externalMessageId String?  @map("external_message_id") @db.VarChar(128)
+  phone             String?  @db.VarChar(30)
+  payload           Json?    @db.JsonB
+  processed         Boolean  @default(false)
+  error             String?  @db.VarChar(2000)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("webhook_logs")
+}
+
+model BotEvent {
+  id             String   @id @default(uuid()) @db.Uuid
+  conversationId String?  @map("conversation_id") @db.Uuid
+  leadId         String?  @map("lead_id") @db.Uuid
+  type           String   @db.VarChar(50)
+  payload        Json?    @db.JsonB
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([conversationId])
+  @@index([type, createdAt])
+  @@map("bot_events")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique @db.VarChar(254)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         String   @db.VarChar(20)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  conversations Conversation[]
+
+  @@map("users")
+}
+
+model PricingConfig {
+  id                  String   @id @default(uuid()) @db.Uuid
+  pricingRangeEnabled Boolean  @default(true) @map("pricing_range_enabled")
+  pricingStartingAt   Decimal  @default(2500) @map("pricing_starting_at") @db.Decimal(12, 2)
+  pricingText         String   @map("pricing_text") @db.VarChar(2000)
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("pricing_config")
+}
