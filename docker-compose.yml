@@ -58,7 +58,7 @@ services:
       SERVER_TYPE: http
       SERVER_PORT: 8080
       # Public URL of THIS Evolution service (its own EasyPanel domain).
-      SERVER_URL: ${EVOLUTION_PUBLIC_URL:-http://localhost:8080}
+      SERVER_URL: https://decodifica-ia-agente-evo.apvu1e.easypanel.host
       CORS_ORIGIN: "*"
       CORS_METHODS: "POST,GET,PUT,DELETE"
       CORS_CREDENTIALS: "true"
@@ -84,7 +84,7 @@ services:
 
       # --- Authentication (same key the app uses to call Evolution) ---
       AUTHENTICATION_TYPE: apikey
-      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      AUTHENTICATION_API_KEY: "ed92b0d34980aef863449440d94a4a486dea1c1d8d395e77"
 
       # --- QR Code ---
       QRCODE_LIMIT: "30"
@@ -133,32 +133,32 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-decodifica}?schema=public
 
       # --- Runtime environment ---
-      APP_ENV: ${APP_ENV:-production}
-      # Defaults let the API boot even before these are set in EasyPanel.
-      # OVERRIDE in EasyPanel: FRONTEND_URL (web domain), PUBLIC_API_URL (api
-      # domain), and especially JWT_SECRET (use a strong random value).
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
-      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
+      # NOTE: valores cravados aqui (em vez de ${...}) porque o EasyPanel desta
+      # instalação não estava injetando as variáveis de forma confiável, o que
+      # derrubava o boot. Reverter para variáveis de ambiente quando o EasyPanel
+      # for corrigido. Os segredos abaixo estão versionados — ROTACIONAR e, se o
+      # repositório for público, torná-lo privado.
+      APP_ENV: production
+      FRONTEND_URL: https://decodifica-ia-agente-web.apvu1e.easypanel.host
+      PUBLIC_API_URL: https://decodifica-ia-agente-api.apvu1e.easypanel.host
 
       # --- Auth ---
-      JWT_SECRET: ${JWT_SECRET:-change-me-please-set-a-strong-jwt-secret-32+}
+      JWT_SECRET: "6cac66288cf3beb598e23fcc950c924515f29cdcb8bed56d9def85720d5db353"
+      ADMIN_EMAIL: admin@decodifica.com
+      ADMIN_PASSWORD: "ac1a5a8ba2ee00738654236d"
 
       # --- LLM provider configuration ---
-      # The engine uses OpenAIProviderService for both providers, reading
-      # OPENAI_API_KEY / OPENAI_BASE_URL (OPENROUTER_* accepted as aliases).
-      LLM_PROVIDER: ${LLM_PROVIDER:-openrouter}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-}
-      MODEL_NAME: ${MODEL_NAME:-gpt-4o-mini}
-      LLM_MODEL_FALLBACK: ${LLM_MODEL_FALLBACK:-google/gemini-2.5-flash}
+      LLM_PROVIDER: openrouter
+      OPENAI_API_KEY: "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"
+      OPENAI_BASE_URL: https://openrouter.ai/api/v1
+      MODEL_NAME: openai/gpt-4o-mini
+      LLM_MODEL_FALLBACK: google/gemini-2.5-flash
 
       # --- Evolution API (internal service URL on the compose network) ---
       EVOLUTION_API_URL: http://evolution-api:8080
-      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
-      EVOLUTION_INSTANCE_NAME: ${EVOLUTION_INSTANCE_NAME:-decodifica}
-      EVOLUTION_WEBHOOK_SECRET: ${EVOLUTION_WEBHOOK_SECRET:-}
+      EVOLUTION_API_KEY: "ed92b0d34980aef863449440d94a4a486dea1c1d8d395e77"
+      EVOLUTION_INSTANCE_NAME: assistente-decodifica
+      EVOLUTION_WEBHOOK_SECRET: ""
 
       # --- Bot behavior toggles ---
       BOT_AUTO_REPLY_ENABLED: ${BOT_AUTO_REPLY_ENABLED:-true}
@@ -187,7 +187,7 @@ services:
       args:
         # Baked into the Vite bundle at build time so the SPA calls the real
         # public API domain. Falls back to the api EasyPanel domain default.
-        VITE_API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
+        VITE_API_URL: https://decodifica-ia-agente-api.apvu1e.easypanel.host
     restart: unless-stopped
     depends_on:
       api:
