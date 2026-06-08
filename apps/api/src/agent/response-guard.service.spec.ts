@@ -513,5 +513,20 @@ describe('ResponseGuardService.guard', () => {
       expect(out.reply).toBe('Como isso tem impactado as vendas?');
     });
   });
+
+  // Feature: conversational-agent-quality — internal classification leak removal.
+  describe('pipe-delimited classification leak removal', () => {
+    it('collapses a "X | Y | Z" classification leak to its first token', () => {
+      const out = service.guard(
+        makeInput({
+          reply:
+            'Para tecnologia | logística | automação industrial, dá para automatizar bastante. Como funciona hoje?',
+          intent: 'general',
+        }),
+      );
+      expect(out.reply).not.toContain('|');
+      expect(out.reply.toLowerCase()).toContain('tecnologia');
+    });
+  });
 });
 

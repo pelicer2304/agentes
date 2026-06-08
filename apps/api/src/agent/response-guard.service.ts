@@ -747,6 +747,9 @@ const ruleSanitization: GuardRule = {
     ];
     if (leakPatterns.some((p) => p.test(currentReply))) return true;
 
+    // Pipe-delimited classification leak, e.g. "tecnologia | logística | ...".
+    if (/[\wà-ú]\s*\|\s*[\wà-ú]/i.test(currentReply)) return true;
+
     const labelPattern = new RegExp(
       `\\b(${INTERNAL_LABELS.join('|')})\\b`,
       'i',
@@ -757,6 +760,13 @@ const ruleSanitization: GuardRule = {
   },
   apply(_input: GuardInput, currentReply: string): string {
     let reply = currentReply;
+
+    // Collapse a pipe-delimited classification run to its first token
+    // (e.g. "tecnologia | logística | automação industrial" -> "tecnologia").
+    reply = reply.replace(
+      /([\wà-ú]+)(?:\s*\|\s*[\wà-ú][\wà-ú\s]*)+/gi,
+      '$1',
+    );
 
     // Remove patterns that look like raw field values leaking into the reply.
     reply = reply.replace(

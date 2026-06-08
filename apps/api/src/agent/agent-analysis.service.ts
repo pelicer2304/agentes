@@ -91,13 +91,25 @@ export class AgentAnalysisService {
       } else if (analysis.status === 'chamar_humano') {
         leadUpdate.status = 'quente';
       }
-      if (analysis.detectedSegment) leadUpdate.segment = analysis.detectedSegment;
+      if (analysis.detectedSegment) {
+        const seg = this.cleanAnalysisValue(analysis.detectedSegment);
+        if (seg) leadUpdate.segment = seg;
+      }
       if (analysis.primaryPain) leadUpdate.mainPain = analysis.primaryPain;
       if (analysis.recommendedService) leadUpdate.recommendedService = analysis.recommendedService;
       if (analysis.whatsappUsage) leadUpdate.whatsappUsage = analysis.whatsappUsage;
-      if (analysis.estimatedVolume) leadUpdate.estimatedVolume = analysis.estimatedVolume;
-      if (analysis.urgency) leadUpdate.urgency = analysis.urgency;
-      if (analysis.decisionRole) leadUpdate.decisionRole = analysis.decisionRole;
+      if (analysis.estimatedVolume) {
+        const vol = this.cleanAnalysisValue(analysis.estimatedVolume);
+        if (vol) leadUpdate.estimatedVolume = vol;
+      }
+      if (analysis.urgency) {
+        const urg = this.cleanAnalysisValue(analysis.urgency);
+        if (urg) leadUpdate.urgency = urg;
+      }
+      if (analysis.decisionRole) {
+        const role = this.cleanAnalysisValue(analysis.decisionRole);
+        if (role) leadUpdate.decisionRole = role;
+      }
       if (analysis.commercialSummary) leadUpdate.summary = analysis.commercialSummary;
       if (analysis.secondaryPains?.length) leadUpdate.secondaryPains = analysis.secondaryPains;
       if (analysis.objections?.length) leadUpdate.objections = analysis.objections;
@@ -188,6 +200,31 @@ Retorne JSON puro:
 
 Lead Score (0-100): negócio(+15), whatsapp(+15), dor(+20), volume(+15), urgência(+10), decisor(+10), aceite(+15)
 Quote Readiness (0-100): negócio(+10), whatsapp(+10), dor principal(+15), lista dores(+20), volume(+10), impacto(+15), sistemas(+10), objetivo(+10)`;
+  }
+
+  /**
+   * Clean a raw analysis classification value before it is persisted to the
+   * Lead or shown to the client. Multi-value classifications ("tecnologia |
+   * logística | automação industrial") are reduced to their FIRST token, and
+   * placeholder/unknown values ("desconhecido", "null", "n/a", ...) are
+   * rejected (returns null) so they never get stored as if they were real
+   * facts. Prevents internal classification artifacts from leaking into replies
+   * and stops "desconhecido" from being treated as a known volume.
+   */
+  private cleanAnalysisValue(raw: string | null | undefined): string | null {
+    if (!raw) return null;
+    let value = String(raw).split(/[|/;,]/)[0].trim();
+    const normalized = value
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    const placeholders = new Set([
+      'desconhecido', 'desconhecida', 'nao informado', 'null', 'none',
+      'n/a', 'na', '-', 'indefinido', 'nenhum', 'nenhuma',
+    ]);
+    if (!value || placeholders.has(normalized)) return null;
+    if (value.length > 40) value = value.slice(0, 40).trim();
+    return value;
   }
 
   private defaultAnalysis(): AnalysisResult {

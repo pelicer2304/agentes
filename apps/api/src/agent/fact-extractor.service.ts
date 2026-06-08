@@ -48,10 +48,10 @@ export class FactExtractorService {
     history: ConversationMessage[],
   ): KnownFacts {
     return {
-      segment: lead.segment || this.extractSegment(history),
+      segment: this.cleanStoredFact(lead.segment) || this.extractSegment(history),
       businessDescription: lead.businessDescription || null,
       whatsappUsage: lead.whatsappUsage || this.extractWhatsappUsage(history),
-      volume: lead.estimatedVolume || this.extractVolume(history),
+      volume: this.cleanStoredFact(lead.estimatedVolume) || this.extractVolume(history),
       systems: this.extractSystems(history),
       decisionRole: lead.decisionRole || this.extractRole(history),
       knownPains: this.extractPains(lead, history),
@@ -65,6 +65,45 @@ export class FactExtractorService {
       volumeAsked: this.checkVolumeAsked(history),
       messageCount: history.length,
     };
+  }
+
+  /**
+   * Clean a fact value stored on the Lead (possibly written by the async
+   * analysis LLM) before use: reduce a multi-value classification to its first
+   * token and reject placeholder/unknown values so "desconhecido" (and pipe-
+   * delimited segment classifications) never surface as real facts.
+   */
+  private cleanStoredFact(raw: string | null | undefined): string | null {
+    if (!raw) return null;
+    const value = String(raw).split(/[|/;]/)[0].trim();
+    const normalized = value
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    const placeholders = new Set([
+      'desconhecido', 'desconhecida', 'nao informado', 'null', 'none',
+      'n/a', 'na', '-', 'indefinido', 'nenhum', 'nenhuma',
+    ]);
+    if (!value || placeholders.has(normalized)) return null;
+    return value;
+  }
+
+  /**
+   * Clean a captured segment phrase: lowercase, cut at the first connector or
+   * punctuation, trim, and bound the length. Returns null when nothing
+   * meaningful remains.
+   */
+  private cleanSegmentPhrase(raw: string): string | null {
+    let phrase = raw
+      .toLowerCase()
+      .split(/[,.;:!?]/)[0]
+      .split(/\s+(?:e|mas|porque|por que|que|para|pra|pois|com|sem|onde|quando)\s+/)[0]
+      .trim();
+    if (phrase.length > 30) {
+      phrase = phrase.slice(0, 30).trim();
+    }
+    if (phrase.length < 3) return null;
+    return phrase;
   }
 
   private extractSegment(history: ConversationMessage[]): string | null {
@@ -117,25 +156,6 @@ export class FactExtractorService {
       }
     }
     return null;
-  }
-
-  /**
-   * Clean a captured segment phrase: lowercase, cut at the first connector
-   * (e, mas, porque, que, para, ...) or punctuation, trim, and bound the
-   * length. Returns null when nothing meaningful remains.
-   */
-  private cleanSegmentPhrase(raw: string): string | null {
-    let phrase = raw
-      .toLowerCase()
-      .split(/[,.;:!?]/)[0]
-      .split(/\s+(?:e|mas|porque|por que|que|para|pra|pois|com|sem|onde|quando)\s+/)[0]
-      .trim();
-    if (phrase.length > 30) {
-      phrase = phrase.slice(0, 30).trim();
-    }
-    // Reject obviously empty / filler captures.
-    if (phrase.length < 3) return null;
-    return phrase;
   }
 
   private extractWhatsappUsage(history: ConversationMessage[]): string | null {
