@@ -500,42 +500,83 @@ function significantWords(text: string): Set<string> {
   return new Set(words.filter((w) => w.length >= 4 && !stop.has(w)));
 }
 
+/** Count how many significant words of `text` also appear in `wordSet`. */
+function countSharedWords(text: string, wordSet: Set<string>): number {
+  let shared = 0;
+  for (const w of significantWords(text)) {
+    if (wordSet.has(w)) shared += 1;
+  }
+  return shared;
+}
+
+/** Capitalize the first letter of a string. */
+function capitalizeFirst(text: string): string {
+  return text.length > 0 ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
+
+// Connectors that introduce a redundant restatement of what the client said.
+const ECHO_CONNECTORS = [
+  'com ',
+  'com isso',
+  'sobre ',
+  'entao',
+  'diante',
+  'considerando',
+  'pelo que',
+  'visto que',
+  'ja que',
+  'sendo assim',
+  'então',
+];
+
 /**
  * Strip a leading "echo" clause that merely restates what the client just said
- * (e.g. "Com vendas de etiquetas e problemas no atendimento, me conta ..."),
- * which reads as redundant. We only strip the part before the FIRST comma when
- * that clause shares >= 2 significant words with the client's message, keeping
- * the rest (the actual answer/question) and capitalizing it. Returns the reply
+ * (e.g. "Com vendas de etiquetas e problemas no atendimento, me conta ..." or
+ * "Vendo carros. Como ..."), which reads as redundant. Handles two shapes:
+ *   1. A connector preamble up to the first comma ("Com ...,"); stripped when
+ *      it starts with an echo connector and shares >=1 word with the client
+ *      message, OR shares >=2 words regardless of connector.
+ *   2. An echoing first sentence ending in a period ("Vendo carros."); stripped
+ *      when it shares >=2 significant words with the client message.
+ * Keeps the rest (the actual answer/question), capitalized. Returns the reply
  * unchanged when there is no such echo.
  */
 function stripLeadingEcho(reply: string, userMessage: string): string {
-  const commaIdx = reply.indexOf(',');
-  if (commaIdx < 6 || commaIdx > 100) {
-    return reply;
-  }
-  const lead = reply.slice(0, commaIdx);
-  // Never strip if the lead clause itself is the question or holds terminal
-  // punctuation (it is then a real sentence, not a preamble).
-  if (/[?.!]/.test(lead)) {
-    return reply;
-  }
-  const rest = reply.slice(commaIdx + 1).trim();
-  if (rest.length < 8) {
-    return reply;
-  }
-
-  const leadWords = significantWords(lead);
+  const trimmed = reply.trim();
   const msgWords = significantWords(userMessage);
-  let shared = 0;
-  for (const w of leadWords) {
-    if (msgWords.has(w)) {
-      shared += 1;
+  const normalize = (t: string) =>
+    t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Case 1: connector / restatement preamble up to the first comma.
+  const commaIdx = trimmed.indexOf(',');
+  if (commaIdx >= 6 && commaIdx <= 110) {
+    const lead = trimmed.slice(0, commaIdx);
+    if (!/[?.!]/.test(lead)) {
+      const rest = trimmed.slice(commaIdx + 1).trim();
+      if (rest.length >= 8) {
+        const leadNorm = normalize(lead);
+        const startsWithConnector = ECHO_CONNECTORS.some((c) =>
+          leadNorm.startsWith(c.trim()),
+        );
+        const shared = countSharedWords(lead, msgWords);
+        if ((startsWithConnector && shared >= 1) || shared >= 2) {
+          return capitalizeFirst(rest);
+        }
+      }
     }
   }
-  if (shared < 2) {
-    return reply;
+
+  // Case 2: an echoing first sentence ending with terminal punctuation.
+  const m = trimmed.match(/^([^.?!]{4,80})[.!?]\s+([\s\S]+)$/);
+  if (m) {
+    const lead = m[1];
+    const rest = m[2].trim();
+    if (rest.length >= 8 && countSharedWords(lead, msgWords) >= 2) {
+      return capitalizeFirst(rest);
+    }
   }
-  return rest.charAt(0).toUpperCase() + rest.slice(1);
+
+  return reply;
 }
 
 const rule2HandoffCompleted: GuardRule = {

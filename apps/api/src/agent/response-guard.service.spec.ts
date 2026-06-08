@@ -488,6 +488,30 @@ describe('ResponseGuardService.guard', () => {
       // The handoff offer (and its contextual preamble) is preserved.
       expect(out.reply.toLowerCase()).toMatch(/encaminh/);
     });
+
+    it('strips an echo first sentence ending in a period', () => {
+      const out = service.guard(
+        makeInput({
+          reply: 'Vendo carros. Como o atendimento atual está funcionando?',
+          userMessage: 'entao eu queria saber, hoje eu vendo carros',
+          intent: 'direct_question',
+        }),
+      );
+      expect(out.reply).toBe('Como o atendimento atual está funcionando?');
+      expect(out.reply.toLowerCase()).not.toContain('vendo carros');
+    });
+
+    it('strips a "Com ..." restatement preamble that echoes the client', () => {
+      const out = service.guard(
+        makeInput({
+          reply:
+            'Com dois atendentes sobrecarregados, como isso tem impactado as vendas?',
+          userMessage: 'tenho 2 atendentes mas nao tao dando conta da demanda',
+          intent: 'general',
+        }),
+      );
+      expect(out.reply).toBe('Como isso tem impactado as vendas?');
+    });
   });
 });
 

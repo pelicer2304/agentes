@@ -359,22 +359,27 @@ export class AgentReplyService {
         '\nPRÓXIMO PASSO: Continue entendendo o impacto da dor (frequência, consequência, o que já tentaram). Só ofereça encaminhamento quando o cenário estiver claro. NÃO ofereça agora.';
     }
 
+    // Answer-before-follow-up ordering (R1.4) and, for direct questions,
+    // subject-first handling (R1.3). When the client asks a direct question,
+    // answering it takes PRIORITY over the discovery funnel.
+    const directQuestionDirective = isDirectQuestion
+      ? '\nA MENSAGEM DO CLIENTE É UMA PERGUNTA. RESPONDA a pergunta dele de forma clara, concreta e direta ANTES de tudo. Se ele perguntar como funciona, explique de verdade (a IA atende no WhatsApp seguindo as regras do seu negócio, responde as dúvidas comuns na hora e, quando o caso é mais específico, passa para uma pessoa). Só DEPOIS de responder, se fizer sentido, faça no máximo UMA pergunta curta. NUNCA ignore a pergunta do cliente para seguir seu roteiro.'
+      : '';
+
+    // The discovery funnel only drives the conversation when the client is NOT
+    // asking something — a direct question must be answered first.
+    const guidance = isDirectQuestion ? directQuestionDirective : nextActionNote;
+
     // Do-not-re-offer block derived from the SaidRecord (R6.3 / R6.4 / R2.4).
     const doNotReofferNote = this.buildDoNotReofferNote(said);
 
-    // Answer-before-follow-up ordering (R1.4) and, for direct questions,
-    // subject-first handling (R1.3).
     let orderingNote =
       '\nORDEM DA RESPOSTA: Primeiro responda/atenda à mensagem do cliente; só depois, se necessário, faça UMA pergunta de continuidade. A resposta SEMPRE vem antes da pergunta.';
-    if (isDirectQuestion) {
-      orderingNote +=
-        '\nO cliente fez uma PERGUNTA DIRETA. Comece tratando exatamente o assunto perguntado. Se não conseguir responder por completo, reconheça o assunto específico e diga o que é necessário para responder (não desvie do assunto).';
-    }
 
     return `Você é ${agentName}, pré-vendedor da Decodifica. Solução = atendimento humanizado com IA para WhatsApp.
 
 ${factsBlock}
-${nextActionNote}${doNotReofferNote}${orderingNote}
+${guidance}${doNotReofferNote}${orderingNote}
 
 REGRAS ABSOLUTAS:
 - Max 250 chars na resposta
