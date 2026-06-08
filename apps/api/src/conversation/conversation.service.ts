@@ -465,10 +465,16 @@ export class ConversationService {
       }
     }
 
-    // 15. Fire async analysis for LLM-path turns only — but NEVER concurrently
-    //     for the same conversation (debounce), so it can't engasgar a próxima
-    //     resposta ao cliente.
-    if (usedLLM && !this.analysisInFlight.has(conversationId)) {
+    // 15. Fire async analysis for LLM-path turns only — debounced (nunca duas
+    //     ao mesmo tempo na mesma conversa) E throttled. A análise é pesada
+    //     (~15-25s de LLM) e, mesmo debounced, uma rodada sozinha pode atrasar
+    //     o próximo turno além do ENGINE_TIMEOUT_MS (12s) e forçar o fallback de
+    //     timeout. Como score/temperatura são recalculados deterministicamente a
+    //     cada turno, basta refinar o CRM periodicamente: roda nos 2 primeiros
+    //     turnos (baseline) e depois a cada 3.
+    const userTurns = history.filter((m) => m.role === 'user').length;
+    const shouldAnalyze = userTurns <= 2 || userTurns % 3 === 0;
+    if (usedLLM && shouldAnalyze && !this.analysisInFlight.has(conversationId)) {
       this.analysisInFlight.add(conversationId);
       this.agentAnalysis
         .runAsync(conversationId, conversation.leadId, history, stage)
