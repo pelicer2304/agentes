@@ -149,7 +149,9 @@ services:
 
       # --- LLM provider configuration ---
       LLM_PROVIDER: openrouter
-      OPENAI_API_KEY: "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"
+      # NUNCA cravar a chave aqui: ao ir pro git, o GitHub avisa o OpenRouter
+      # (secret scanning) e a chave e revogada em minutos. Vem da env do EasyPanel.
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
       OPENAI_BASE_URL: https://openrouter.ai/api/v1
       MODEL_NAME: openai/gpt-4o-mini
       LLM_MODEL_FALLBACK: google/gemini-2.5-flash
