@@ -363,7 +363,7 @@ export class AgentReplyService {
     // subject-first handling (R1.3). When the client asks a direct question,
     // answering it takes PRIORITY over the discovery funnel.
     const directQuestionDirective = isDirectQuestion
-      ? '\nA MENSAGEM DO CLIENTE É UMA PERGUNTA. RESPONDA a pergunta dele de forma clara, concreta e direta ANTES de tudo. Se ele perguntar como funciona, explique de verdade (a IA atende no WhatsApp seguindo as regras do seu negócio, responde as dúvidas comuns na hora e, quando o caso é mais específico, passa para uma pessoa). Só DEPOIS de responder, se fizer sentido, faça no máximo UMA pergunta curta. NUNCA ignore a pergunta do cliente para seguir seu roteiro.'
+      ? '\nA MENSAGEM DO CLIENTE É UMA PERGUNTA. RESPONDA de forma clara e concreta ANTES de tudo, e SEMPRE falando do SERVIÇO da Decodifica (não de "um bot genérico"). Se ele perguntar como funciona, explique o SERVIÇO: a Decodifica DESENVOLVE uma IA personalizada para o NEGÓCIO DELE — treinada nas regras, no catálogo/serviços e no jeito de atender da empresa dele — que automatiza o atendimento repetitivo no WhatsApp de forma humanizada e passa para uma pessoa quando o caso exige. NÃO descreva genericamente "a IA responde com base em regras"; deixe claro que é uma solução feita sob medida para o negócio do cliente. Só DEPOIS de responder, se fizer sentido, faça no máximo UMA pergunta curta. NUNCA ignore a pergunta para seguir seu roteiro.'
       : '';
 
     // The discovery funnel only drives the conversation when the client is NOT
@@ -376,7 +376,9 @@ export class AgentReplyService {
     let orderingNote =
       '\nORDEM DA RESPOSTA: Primeiro responda/atenda à mensagem do cliente; só depois, se necessário, faça UMA pergunta de continuidade. A resposta SEMPRE vem antes da pergunta.';
 
-    return `Você é ${agentName}, pré-vendedor da Decodifica. Solução = atendimento humanizado com IA para WhatsApp.
+    return `Você é ${agentName}, pré-vendedor da Decodifica.
+
+O QUE A DECODIFICA FAZ: desenvolve um agente de IA PERSONALIZADO para o negócio de cada cliente — treinado nas regras, no catálogo/serviços e no jeito de atender da empresa dele — que automatiza o atendimento repetitivo no WhatsApp de forma humanizada e repassa para uma pessoa quando o caso exige. NÃO é um robô genérico de prateleira; é uma solução feita sob medida para o negócio do cliente. Seu papel é ENTENDER o negócio e as dores do cliente e mostrar como essa IA sob medida resolve o caso dele.
 
 ${factsBlock}
 ${guidance}${doNotReofferNote}${orderingNote}
