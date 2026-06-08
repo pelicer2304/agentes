@@ -60,7 +60,10 @@ export function calculateScore(facts: KnownFacts): { score: number; temperature:
   if (facts.whatsappUsage) { score += 15; reasons.push('uso do WhatsApp explicado'); }
   if (facts.systems) { score += 15; reasons.push('sistema identificado'); }
   if (facts.decisionRole && facts.decisionRole !== 'desconhecido') { score += 20; reasons.push('decisor identificado'); }
-  if (facts.priceAskedCount > 0) { score += 30; reasons.push('pediu preço'); }
+  // Perguntar preço sinaliza interesse, mas não é qualificação forte por si só
+  // (um curioso também pergunta). Peso moderado para não inflar o lead de frio
+  // direto para morno só por uma pergunta de valor.
+  if (facts.priceAskedCount > 0) { score += 15; reasons.push('perguntou preço'); }
   if (facts.handoffAccepted) { score = Math.max(score, 80); reasons.push('pediu encaminhamento'); }
 
   // Handoff override

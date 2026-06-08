@@ -54,9 +54,9 @@ const HANDOFF_ORDER: Record<HandoffState, number> = {
  * internal labels (R10.3, R8).
  */
 const HANDOFF_CONFIRMATION_REPLY =
-  'Perfeito, vou encaminhar você para o nosso time agora mesmo. ' +
-  'Em breve alguém entra em contato para dar sequência. ' +
-  'Enquanto isso, posso adiantar mais alguma informação para você?';
+  'Boa, vou te encaminhar pro nosso time agora. ' +
+  'Em breve alguém te chama por aqui pra seguir com você. ' +
+  'Quer adiantar mais alguma coisa enquanto isso?';
 
 /**
  * Returns the higher of two handoff states according to the lifecycle order.

@@ -8,10 +8,33 @@ import { AppModule } from './app.module';
 import { AppConfigService } from './config/config.service';
 import { HttpExceptionFilterGlobal } from './common/http-exception.filter';
 
+/**
+ * Aborts startup in production when JWT_SECRET is left at a default/weak value.
+ * A predictable secret would let anyone forge valid session tokens. Only
+ * enforced in production so local/staging defaults keep working.
+ */
+function assertProductionJwtSecretIsStrong(config: AppConfigService): void {
+  if (!config.isProduction) return;
+  const jwt = config.jwtSecret ?? '';
+  const looksDefault = /change[- ]?me|changeme|^secret$|^your[-_]/i.test(jwt);
+  if (looksDefault || jwt.length < 24) {
+    // eslint-disable-next-line no-console
+    console.error(
+      'Startup aborted: JWT_SECRET is a default/weak value in production. ' +
+        'Set a random secret of 32+ characters before deploying.',
+    );
+    process.exit(1);
+  }
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   const configService = app.get(AppConfigService);
+
+  // Em produção, recusar subir com JWT_SECRET default/fraco — caso contrário os
+  // tokens de sessão seriam forjáveis. Em dev/staging segue liberado.
+  assertProductionJwtSecretIsStrong(configService);
 
   // Normalize allowed origins: strip trailing slashes so a FRONTEND_URL like
   // "https://app.example.com/" still matches the browser's Origin header

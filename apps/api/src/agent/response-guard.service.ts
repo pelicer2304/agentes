@@ -122,23 +122,23 @@ const HANDOFF_QUESTION_WORDS: string[] = [
 
 const SEGMENT_TEMPLATES: Record<string, string> = {
   clinica:
-    'Com o volume de agendamentos e a equipe sobrecarregada, faz sentido avaliar um atendimento humanizado com IA. Quer que eu encaminhe seu caso para a equipe?',
+    'Com a agenda cheia e a equipe no limite, dá pra tirar bastante peso do atendimento. Quer que eu te encaminhe pra alguém da equipe olhar isso com você?',
   etiqueta:
-    'Pelo que você descreveu, a IA pode coletar material, medida, quantidade, cor, acabamento e prazo antes do vendedor assumir. Quer que eu encaminhe para a equipe avaliar esse fluxo?',
+    'Dá pra IA já puxar material, medida, quantidade e prazo antes do vendedor entrar. Quer que eu te encaminhe pra equipe ver esse fluxo com você?',
   restaurante:
-    'Com esse volume de pedidos, faz sentido avaliar um atendimento com IA para organizar cardápio, pedidos e dúvidas antes do humano assumir. Quer que eu encaminhe?',
+    'Com esse movimento de pedidos, dá pra organizar cardápio, pedido e dúvida antes de chegar em vocês. Quer que eu te encaminhe pra equipe olhar isso?',
   academia:
-    'Com perguntas sobre planos, horários e matrícula, a IA pode responder dúvidas iniciais e encaminhar interessados para a equipe. Quer que eu encaminhe esse cenário para avaliação?',
+    'Dúvida de plano, horário e matrícula a IA já resolve na entrada. Quer que eu te encaminhe pra equipe ver isso com você?',
   contabil:
-    'Com perguntas repetidas sobre prazos, documentos e impostos, a IA pode aliviar o atendimento inicial e organizar solicitações. Quer que eu encaminhe para a equipe avaliar?',
+    'Dá pra IA segurar as perguntas repetidas de prazo e documento e organizar os pedidos. Quer que eu te encaminhe pra equipe olhar isso?',
   imobiliaria:
-    'Com o volume de leads e a necessidade de resposta rápida, faz sentido avaliar um pré-atendimento com IA para filtrar e qualificar. Quer que eu encaminhe?',
+    'Com esse tanto de lead, dá pra filtrar e responder rápido antes de passar pro corretor. Quer que eu te encaminhe pra equipe ver isso com você?',
   petshop:
-    'Com o volume de agendamentos de banho e tosa, faz sentido avaliar um atendimento com IA para organizar horários e confirmar automaticamente. Quer que eu encaminhe?',
+    'Banho, tosa e agendamento a IA já organiza e confirma sozinha. Quer que eu te encaminhe pra equipe olhar isso?',
   loja:
-    'Com o volume de perguntas sobre produtos e a equipe sobrecarregada, faz sentido avaliar um atendimento com IA. Quer que eu encaminhe?',
+    'Com esse tanto de pergunta sobre produto, dá pra responder na hora e segurar o cliente. Quer que eu te encaminhe pra equipe ver isso com você?',
   fallback:
-    'Pelo que você descreveu, faz sentido a equipe avaliar um atendimento humanizado com IA para reduzir retrabalho e organizar melhor o WhatsApp. Quer que eu encaminhe seu caso com esse resumo?',
+    'Dá pra tirar bastante peso do seu WhatsApp e organizar melhor o atendimento. Quer que eu te encaminhe pra alguém da equipe olhar esse fluxo com você?',
 };
 
 const IA_EXPLANATION_PHRASE =
@@ -228,9 +228,12 @@ function getSafePriceResponse(
   startingPrice: string | null,
 ): string {
   if (pricingRangeEnabled && startingPrice) {
-    return `Para referência, projetos simples começam a partir de ${startingPrice}. Como o valor final depende do escopo, posso encaminhar para a equipe te passar uma estimativa direta.`;
+    const priceClause = /[.!?]$/.test(startingPrice)
+      ? startingPrice
+      : `${startingPrice}.`;
+    return `Pra ser direto no valor: ${priceClause} O número final depende do tamanho do atendimento e das integrações. Quer que eu chame a equipe pra fechar isso com você?`;
   }
-  return 'Sem uma faixa configurada aqui, não consigo te passar um valor fechado. O que posso fazer é encaminhar para a equipe te dar uma estimativa direta com base no seu caso, sem mais perguntas.';
+  return 'Sobre o valor, por aqui não consigo fechar um número, mas posso chamar a equipe pra te dar uma estimativa direta pro seu caso, sem mais pergunta. Quer?';
 }
 
 function matchesAcceptancePhrase(userMessage: string): boolean {

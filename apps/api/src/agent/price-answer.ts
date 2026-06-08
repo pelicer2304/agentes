@@ -33,17 +33,22 @@ export function composePriceAnswer(input: PriceAnswerInput): string {
   if (input.pricingRangeEnabled && hasStartingPrice) {
     // R2.1 acknowledge + R2.2 include the configured starting-price text.
     // No AI-behavior explanation (R2.4) and no refusal phrasing (R2.5).
+    // Normaliza a pontuação para o texto configurado não grudar na frase
+    // seguinte (ex.: "R$ 2.500" sem ponto).
+    const priceClause = /[.!?]$/.test(startingPriceText)
+      ? startingPriceText
+      : `${startingPriceText}.`;
     return (
-      `Ótima pergunta sobre valores. ${startingPriceText} ` +
-      'A partir daí, o número final varia conforme o escopo do seu projeto. ' +
-      'Quer que eu detalhe o que entra nesse investimento?'
+      `Boa pergunta. Pra te dar uma base: ${priceClause} ` +
+      'O valor final depende do tamanho do atendimento e do que precisa integrar. ' +
+      'Quer que eu chame a equipe pra fechar um número certo pro seu caso?'
     );
   }
 
   // R2.1 acknowledge + R2.3 depends on scope and offer to route to the team.
   return (
-    'Boa pergunta sobre preço. O valor final depende do escopo de cada ' +
-    'projeto, então, para te passar um número certeiro, posso encaminhar ' +
-    'você para o nosso time montar uma estimativa direta pra sua necessidade?'
+    'Boa pergunta sobre preço. O valor fecha conforme o escopo de cada ' +
+    'projeto, então, pra te passar um número certo, posso te encaminhar pro ' +
+    'nosso time montar uma estimativa pro seu caso. Quer?'
   );
 }

@@ -12,6 +12,11 @@ import {
  */
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
+/** Timeout por tentativa de request ao Evolution_API (ms). */
+const EVOLUTION_REQUEST_TIMEOUT_MS = 15_000;
+/** Backoff base entre retentativas (ms); cresce linearmente por tentativa. */
+const EVOLUTION_RETRY_BACKOFF_MS = 400;
+
 /**
  * Options for an Evolution_API HTTP request.
  */
@@ -22,6 +27,13 @@ interface EvolutionRequestOptions {
   path: string;
   /** Optional JSON body to send. */
   body?: unknown;
+  /**
+   * Number of EXTRA retries on transient failures (network error, timeout,
+   * HTTP 5xx, or 429). Defaults to 0 (single attempt). Used by `sendTextMessage`
+   * because a transient network failure means the message almost certainly was
+   * not delivered, so retrying is safe and avoids silently losing the reply.
+   */
+  retries?: number;
 }
 
 /**
@@ -81,6 +93,9 @@ export class EvolutionService {
         method: 'POST',
         path: `/message/sendText/${this.instance}`,
         body,
+        // Reenvia em falha transiente: perder a resposta do bot é pior que o
+        // risco baixo de duplicar numa indisponibilidade momentânea.
+        retries: 2,
       },
       (data) => {
         const payload = data as { key?: { id?: string }; id?: string };
@@ -243,46 +258,94 @@ export class EvolutionService {
   ): Promise<EvolutionResult<T>> {
     const baseUrl = this.config.evolutionApiUrl.replace(/\/+$/, '');
     const url = `${baseUrl}${options.path}`;
+    const maxAttempts = Math.max(1, (options.retries ?? 0) + 1);
 
-    try {
-      const response = await fetch(url, {
-        method: options.method,
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: this.config.evolutionApiKey,
-        },
-        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-      });
+    // Default failure used only if the loop somehow yields nothing.
+    let lastFailure: EvolutionResult<T> = {
+      ok: false,
+      error: this.scrub(`Evolution API request to ${options.path} failed`),
+    };
 
-      const rawText = await response.text();
-      const parsed = this.safeParseJson(rawText);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Per-attempt timeout so a hung connection cannot block the reply
+      // forever (and so a retry can actually fire).
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(),
+        EVOLUTION_REQUEST_TIMEOUT_MS,
+      );
 
-      if (!response.ok) {
+      try {
+        const response = await fetch(url, {
+          method: options.method,
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: this.config.evolutionApiKey,
+          },
+          body:
+            options.body !== undefined
+              ? JSON.stringify(options.body)
+              : undefined,
+          signal: controller.signal,
+        });
+
+        const rawText = await response.text();
+        const parsed = this.safeParseJson(rawText);
+
+        if (response.ok) {
+          return { ok: true, data: map(parsed) };
+        }
+
         const detail =
           typeof parsed === 'object' && parsed !== null
             ? JSON.stringify(parsed)
             : rawText;
-        return this.failure(
+        // 4xx (except 429) is a client error — retrying will not help.
+        const transient = response.status >= 500 || response.status === 429;
+        lastFailure = this.failure(
           `Evolution API request to ${options.path} failed with status ${response.status}: ${detail}`,
+          transient && attempt < maxAttempts,
         );
+        if (!transient) return lastFailure;
+      } catch (error) {
+        // Network error or timeout (AbortError): transient, worth retrying.
+        lastFailure = this.failure(
+          `Evolution API request to ${options.path} failed: ${this.errorMessage(error)}`,
+          attempt < maxAttempts,
+        );
+      } finally {
+        clearTimeout(timer);
       }
 
-      return { ok: true, data: map(parsed) };
-    } catch (error) {
-      return this.failure(
-        `Evolution API request to ${options.path} failed: ${this.errorMessage(error)}`,
-      );
+      if (attempt < maxAttempts) {
+        await this.delay(EVOLUTION_RETRY_BACKOFF_MS * attempt);
+      }
     }
+
+    return lastFailure;
   }
 
   /**
-   * Build a failure result with the API key scrubbed, and log the scrubbed
-   * message (Requirements 14.3, 18.2, 18.6).
+   * Build a failure result with the API key scrubbed. Logs the scrubbed message
+   * as a warning when another retry will follow, or as an error when it is the
+   * terminal failure (Requirements 14.3, 18.2, 18.6).
    */
-  private failure<T = never>(message: string): EvolutionResult<T> {
+  private failure<T = never>(
+    message: string,
+    willRetry = false,
+  ): EvolutionResult<T> {
     const safe = this.scrub(message);
-    this.logger.error(safe);
+    if (willRetry) {
+      this.logger.warn(`${safe} — retrying`);
+    } else {
+      this.logger.error(safe);
+    }
     return { ok: false, error: safe };
+  }
+
+  /** Resolves after `ms` milliseconds (used for retry backoff). */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**

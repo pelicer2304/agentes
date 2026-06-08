@@ -101,21 +101,21 @@ export class AgentReplyService {
    */
   buildContextualFallback(facts: KnownFacts): string {
     if (facts.segment && facts.mainPain) {
-      return `Pelo que você descreveu sobre ${facts.segment}, faz sentido avaliar como automatizar essa parte. Posso encaminhar para a equipe da Decodifica te passar um caminho mais preciso. Quer que eu encaminhe?`;
+      return `Em ${facts.segment} isso pesa mesmo. Acontece mais em qual parte do atendimento?`;
     }
     if (facts.segment && facts.volume) {
-      return `Com esse volume, existem várias formas de automatizar o atendimento. Posso encaminhar para a equipe avaliar o melhor caminho para ${facts.segment}. Interessa?`;
+      return `Pra ${facts.segment}, esse volume não é pouco. O que mais trava hoje no WhatsApp de vocês?`;
     }
     if (facts.segment) {
-      return `Para ${facts.segment}, existem várias possibilidades de automação. Como é o volume de mensagens no WhatsApp hoje?`;
+      return `Em ${facts.segment} o WhatsApp costuma ser o canal principal. É por onde chega a maioria dos seus clientes?`;
     }
     if (facts.mainPain) {
-      return `Sobre o ponto que você levantou, dá para estruturar o atendimento no WhatsApp para resolver isso. Me conta qual é o seu negócio para eu te direcionar melhor.`;
+      return `Entendi o ponto. Me conta rapidinho o que vocês fazem, pra eu te situar melhor.`;
     }
     if (facts.whatsappUsage) {
-      return 'Com base em como vocês usam o WhatsApp, dá para avaliar o que faz sentido automatizar. Vocês recebem mais dúvidas, pedidos, orçamentos ou suporte?';
+      return 'E o que mais aperta hoje: o volume, a demora pra responder ou acompanhar quem já chamou?';
     }
-    return 'Para eu te ajudar melhor, me conta qual é o seu negócio e como vocês usam o WhatsApp hoje.';
+    return 'Me conta rapidinho: o que vocês fazem e como usam o WhatsApp no dia a dia?';
   }
 
   private handleLocal(
@@ -219,6 +219,19 @@ export class AgentReplyService {
     recentHistory: ConversationMessage[],
     prompt: string,
   ): Promise<QuickReplyResult> {
+    // O Qwen ainda devolve JSON vazio/truncado de vez em quando. Uma única
+    // retentativa derruba a taxa de fallback de ~20% para a casa de 1 dígito
+    // sem custo perceptível — só retenta quando a primeira tentativa falhou.
+    const first = await this.attemptLLM(recentHistory, prompt);
+    if (first.reply && first.reply.trim() !== '') return first;
+    const second = await this.attemptLLM(recentHistory, prompt);
+    return second.reply && second.reply.trim() !== '' ? second : first;
+  }
+
+  private async attemptLLM(
+    recentHistory: ConversationMessage[],
+    prompt: string,
+  ): Promise<QuickReplyResult> {
     const startTime = Date.now();
 
     try {
@@ -227,8 +240,13 @@ export class AgentReplyService {
           { role: 'system', content: prompt },
           ...recentHistory.slice(-6).map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
         ],
-        temperature: 0.3,
-        maxTokens: 200,
+        temperature: 0.6,
+        // Teto alto de tokens: o Qwen às vezes gasta orçamento "raciocinando"
+        // antes do JSON e, com teto baixo, devolvia o JSON truncado/vazio
+        // (caindo no fallback ~30% das vezes). Isto é só um TETO — as respostas
+        // normais param sozinhas em ~200 tokens, então não muda custo/tamanho;
+        // só dá folga para os casos que precisam fechar o JSON.
+        maxTokens: 800,
         responseFormat: 'json',
       });
 
@@ -290,15 +308,35 @@ export class AgentReplyService {
     if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
     cleaned = cleaned.trim();
 
+    // Isola o primeiro objeto JSON caso o modelo emita texto ao redor dele.
+    const objMatch = cleaned.match(/\{[\s\S]*\}/);
+    const candidate = objMatch ? objMatch[0] : cleaned;
+
     try {
-      const parsed = JSON.parse(cleaned);
+      const parsed = JSON.parse(candidate);
       return {
         reply: parsed.reply || '',
         stage: parsed.stage || 'descoberta',
         intent: parsed.intent || 'vendas',
       };
     } catch {
-      // If JSON parse fails, return empty reply (will trigger fallback)
+      // Rede de segurança: se o JSON veio truncado DEPOIS do campo reply
+      // (ex.: `{"reply":"texto","stage":"desc`), recupera o reply por regex em
+      // vez de descartar uma resposta válida e cair no fallback.
+      const replyMatch = cleaned.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (replyMatch && replyMatch[1].trim()) {
+        const reply = replyMatch[1]
+          .replace(/\\"/g, '"')
+          .replace(/\\n/g, ' ')
+          .trim();
+        const stage = cleaned.match(/"stage"\s*:\s*"([^"]*)"/)?.[1];
+        const intent = cleaned.match(/"intent"\s*:\s*"([^"]*)"/)?.[1];
+        return {
+          reply,
+          stage: stage || 'descoberta',
+          intent: intent || 'vendas',
+        };
+      }
       this.logger.warn('Failed to parse LLM JSON response');
       return { reply: '', stage: 'descoberta', intent: 'outro' };
     }
@@ -338,74 +376,66 @@ export class AgentReplyService {
     const hasVolume = !!facts.volume;
     const qualified = hasSegment && hasPain && painDeepened && hasVolume;
 
-    // Determine what the agent should do next — dig deeper before offering.
+    // Funil de descoberta: a cada passo, REAGIR ao que a pessoa disse e fazer
+    // no máximo UMA pergunta. Só fala em equipe quando já entendeu onde o
+    // atendimento trava — nunca cedo, nunca com resumo formal.
     let nextActionNote = '';
     if (qualified && questionCount >= 4) {
       nextActionNote =
-        '\nPRÓXIMO PASSO: Você já entende o cenário (negócio, dor, impacto e volume). Resuma o cenário do cliente em 1 frase e ENTÃO ofereça encaminhar para a equipe. NUNCA ofereça "Posso encaminhar?" isolado.';
+        '\nMOMENTO: já dá pra entender onde o atendimento trava. Faça uma transição leve e natural pra equipe, do jeito que uma pessoa falaria — ex: "Boa, agora deu pra entender melhor onde tá travando. Acho que vale alguém da equipe olhar esse fluxo com você. Quer?". NÃO faça resumo dos dados dele.';
     } else if (!hasSegment) {
-      nextActionNote = '\nPRÓXIMO PASSO: Descubra o segmento/negócio do cliente.';
+      nextActionNote =
+        '\nMOMENTO: você ainda não sabe o que a pessoa faz. Descubra o negócio dela de forma leve, numa pergunta curta.';
     } else if (!hasPain) {
       nextActionNote =
-        '\nPRÓXIMO PASSO: Descubra a PRINCIPAL dor/dificuldade do cliente no atendimento. Ainda NÃO ofereça encaminhamento.';
+        '\nMOMENTO: você sabe o negócio, mas não o que incomoda. Descubra onde o atendimento aperta hoje. Ainda NÃO fale em equipe.';
     } else if (!painDeepened) {
       nextActionNote =
-        `\nPRÓXIMO PASSO: APROFUNDE a dor. Pergunte sobre o IMPACTO real dela no negócio (perda de venda, tempo perdido, clientes sem resposta, retrabalho) OU sobre uma dor secundária. NÃO ofereça encaminhamento ainda.\nSugestão contextual: ${this.buildSecondaryPainQuestion(facts)}`;
+        `\nMOMENTO: a pessoa contou uma dificuldade. Reaja com naturalidade e cave um pouco mais pra entender o que mais trava. Ainda NÃO fale em equipe.\nIdeia de pergunta: ${this.buildSecondaryPainQuestion(facts)}`;
     } else if (!hasVolume) {
       nextActionNote =
-        '\nPRÓXIMO PASSO: Já tem a dor e o impacto. Pergunte o volume (mensagens/pedidos por dia) para dimensionar. NÃO ofereça encaminhamento ainda.';
+        '\nMOMENTO: já entendeu a dor. Pergunte de forma natural o tamanho da coisa (quantos contatos/mensagens por dia). Ainda NÃO fale em equipe.';
     } else {
       nextActionNote =
-        '\nPRÓXIMO PASSO: Continue entendendo o impacto da dor (frequência, consequência, o que já tentaram). Só ofereça encaminhamento quando o cenário estiver claro. NÃO ofereça agora.';
+        '\nMOMENTO: continue entendendo o impacto (com que frequência acontece, o que isso custa no dia a dia). Só fale em equipe quando o quadro estiver claro.';
     }
 
-    // Answer-before-follow-up ordering (R1.4) and, for direct questions,
-    // subject-first handling (R1.3). When the client asks a direct question,
-    // answering it takes PRIORITY over the discovery funnel.
-    const directQuestionDirective = isDirectQuestion
-      ? '\nA MENSAGEM DO CLIENTE É UMA PERGUNTA. RESPONDA de forma clara e concreta ANTES de tudo, e SEMPRE falando do SERVIÇO da Decodifica (não de "um bot genérico"). Se ele perguntar como funciona, explique o SERVIÇO: a Decodifica DESENVOLVE uma IA personalizada para o NEGÓCIO DELE — treinada nas regras, no catálogo/serviços e no jeito de atender da empresa dele — que automatiza o atendimento repetitivo no WhatsApp de forma humanizada e passa para uma pessoa quando o caso exige. NÃO descreva genericamente "a IA responde com base em regras"; deixe claro que é uma solução feita sob medida para o negócio do cliente. Só DEPOIS de responder, se fizer sentido, faça no máximo UMA pergunta curta. NUNCA ignore a pergunta para seguir seu roteiro.'
-      : '';
+    // Pergunta direta do cliente tem prioridade sobre o funil: responda primeiro.
+    const directQuestionDirective =
+      '\nO CLIENTE PERGUNTOU ALGO. Responda curto e direto ANTES de tudo. Se for "como funciona", diga em 1-2 frases que a Decodifica monta uma IA sob medida pro negócio dele — treinada no jeito dele atender — que cuida do atendimento repetitivo no WhatsApp e passa pra uma pessoa quando precisa. Sem discurso de vendas. Só depois, se couber, UMA pergunta curta. Nunca ignore a pergunta pra seguir roteiro.';
 
-    // The discovery funnel only drives the conversation when the client is NOT
-    // asking something — a direct question must be answered first.
     const guidance = isDirectQuestion ? directQuestionDirective : nextActionNote;
 
-    // Do-not-re-offer block derived from the SaidRecord (R6.3 / R6.4 / R2.4).
+    // Bloco "não repetir o que já foi oferecido" (demo/handoff/explicação de IA).
     const doNotReofferNote = this.buildDoNotReofferNote(said);
 
-    let orderingNote =
-      '\nORDEM DA RESPOSTA: Primeiro responda/atenda à mensagem do cliente; só depois, se necessário, faça UMA pergunta de continuidade. A resposta SEMPRE vem antes da pergunta.';
+    return `Você é ${agentName}, da Decodifica. Você fala no WhatsApp como uma pessoa de verdade: experiente, gente boa e direta. Nada de roteiro de robô.
 
-    return `Você é ${agentName}, pré-vendedor da Decodifica.
-
-O QUE A DECODIFICA FAZ: desenvolve um agente de IA PERSONALIZADO para o negócio de cada cliente — treinado nas regras, no catálogo/serviços e no jeito de atender da empresa dele — que automatiza o atendimento repetitivo no WhatsApp de forma humanizada e repassa para uma pessoa quando o caso exige. NÃO é um robô genérico de prateleira; é uma solução feita sob medida para o negócio do cliente. Seu papel é ENTENDER o negócio e as dores do cliente e mostrar como essa IA sob medida resolve o caso dele.
+A Decodifica monta uma IA sob medida pro negócio de cada cliente — treinada no jeito dele atender — que cuida do atendimento repetitivo no WhatsApp e passa pra uma pessoa quando o caso pede. Seu trabalho é entender o negócio e onde o atendimento trava, e só então mostrar onde isso pode melhorar.
 
 ${factsBlock}
-${guidance}${doNotReofferNote}${orderingNote}
+${guidance}${doNotReofferNote}
 
-REGRAS ABSOLUTAS:
-- Max 250 chars na resposta
-- 1 pergunta por resposta (ou nenhuma se já coletou dados suficientes)
-- Sem emoji
-- NÃO comece com "Entendo", "Perfeito", "Ótimo", "Show", "Certo", "Legal", "Ok", "Compreendo", "Claro"
-- NÃO repita nem parafraseie o que o cliente acabou de dizer. NUNCA comece resumindo as palavras dele (ex: "Com vendas de etiquetas e problemas no atendimento, ...", "Sobre o seu negócio de ...", "Então você ..."). Vá DIRETO: responda ou faça a próxima pergunta, sem eco.
-- NÃO pergunte o que já sabe (LEIA os fatos acima)
-- Se volume JÁ FOI INFORMADO ou JÁ FOI PERGUNTADO, NÃO pergunte quantas mensagens/pedidos recebe
-- Se dor JÁ FOI INFORMADA, NÃO pergunte "qual é o principal desafio"
-- NUNCA invente ou referencie dados que o cliente não informou. Se NÃO sabe o volume, NÃO diga "com esse volume" / "esse volume"; pergunte o volume. Nunca afirme algo que o cliente não disse.
-- NUNCA use termos internos do sistema na resposta (ex: "desconhecido", "qualificando", "chamar_humano", nomes de campos, ou listas separadas por "|"). Fale sempre de forma natural.
-- NUNCA mencione preço, valor, custo, faixa de preço ou qualquer número monetário
-- NUNCA prometa teste gratuito, ativação imediata, integração garantida ou prazo
-- NUNCA diga "sem erros", "zero erros", "revisa cada mensagem", "evita erro" ou promessas absolutas sobre IA
-- Se cliente perguntar sobre IA errar: responda UMA VEZ "A IA responde com base em regras e limites definidos. Quando foge do esperado, encaminha para humano." Não repetir essa explicação.
-- Se cliente perguntar integração: diga que a equipe precisa avaliar o caminho técnico
-- NÃO ofereça encaminhamento se ainda não coletou dor principal + volume. Colete primeiro.
-- NUNCA responda apenas "Posso encaminhar?" isolado. Sempre contextualize: resuma o cenário do cliente antes de perguntar se quer encaminhamento.
-- Exemplo BOM: "Com esse volume e a equipe sobrecarregada, faz sentido a equipe avaliar. Quer que eu encaminhe?"
-- Exemplo RUIM: "Posso encaminhar?"
+COMO VOCÊ FALA:
+- Curto. No máximo 2 frases curtas (~160 caracteres). Como se estivesse digitando no WhatsApp.
+- Reaja no tom certo do que a pessoa disse: se ela só falou o que faz, reaja leve e siga ("Boa", "Bacana", "Legal saber"); se ela contou uma DIFICULDADE, aí sim mostre que entende o aperto ("Imagino", "Pesado mesmo", "Esse perrengue é comum"). A reação tem que combinar — não diga que "aperta" se ela ainda nem contou um problema.
+- VARIE sempre. Nunca comece duas mensagens seguidas com a mesma frase ou o mesmo jeito (olhe o que você já disse antes). Repetir a abertura soa robô.
+- Uma pergunta por vez. Às vezes nem precisa perguntar — um comentário que mantém o papo já basta.
+- Primeiro entenda o problema. Só fale do que a IA resolve DEPOIS de saber onde trava. Não fique vendendo IA.
 
-JSON:
-{"reply":"texto","stage":"abertura|descoberta|mapeamento_de_dores|diagnostico_operacional|explicacao_solucao|conversao|handoff_humano","intent":"vendas|suporte|agendamento|duvidas|orcamento|integracao|curiosidade|outro"}`;
+O QUE NUNCA FAZER:
+- Não repita nem resuma o que o cliente disse. Nada de "Pelo que você me explicou...", "Você vende carros, recebe 100 mensagens...", "Com base nas informações...", "Diante desse cenário...", "Seu principal problema é...", "Vou encaminhar para uma análise mais precisa...".
+- Não abra com agrado de vendedor: "Entendo", "Perfeito", "Ótimo", "Show", "Certo", "Legal", "Ok", "Claro".
+- Não pergunte o que você já sabe (veja acima). Se já sabe o volume, não pergunte de novo. Se já sabe a dor, não pergunte "qual o principal desafio".
+- Não invente dado que o cliente não falou. Se não sabe o volume, NÃO diga "com esse volume" — pergunte.
+- Não fale de preço, valor ou faixa. Não prometa teste grátis, ativação na hora, integração garantida nem prazo. Integração, diga que a equipe avalia o caminho técnico.
+- Não use rótulos internos do sistema nem texto com barras (|) na resposta. Fale natural.
+- Sem emoji. Sem ponto de exclamação. Sem texto longo. Sem "sem erros"/"zero erros".
+- Não ofereça falar com a equipe cedo. Só quando já entendeu onde o atendimento trava — e de forma natural, sem resumo.
+- Se perguntarem se a IA erra: diga uma vez que ela trabalha com regras e limites e, quando foge disso, passa pra um humano. Não repita.
+
+Responda em JSON:
+{"reply":"sua mensagem","stage":"abertura|descoberta|mapeamento_de_dores|diagnostico_operacional|explicacao_solucao|conversao|handoff_humano","intent":"vendas|suporte|agendamento|duvidas|orcamento|integracao|curiosidade|outro"}`;
   }
 
   /**

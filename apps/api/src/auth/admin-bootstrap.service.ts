@@ -22,6 +22,20 @@ export class AdminBootstrapService implements OnModuleInit {
     const email = process.env.ADMIN_EMAIL || 'admin@decodifica.com';
     const password = process.env.ADMIN_PASSWORD || 'changeme123';
 
+    // Em produção, recusar subir com senha de admin ausente ou no default
+    // ("changeme123"): isso evita um admin trivialmente acessível num deploy
+    // real. Lançar aqui aborta o boot (o catch do bootstrap encerra o processo).
+    // Em desenvolvimento o default segue valendo para conveniência local.
+    if (
+      process.env.APP_ENV === 'production' &&
+      (!process.env.ADMIN_PASSWORD || password === 'changeme123')
+    ) {
+      throw new Error(
+        'ADMIN_PASSWORD ausente ou ainda no default "changeme123" em produção. ' +
+          'Defina uma senha de admin forte (variável ADMIN_PASSWORD) antes de subir.',
+      );
+    }
+
     try {
       const existing = await this.prisma.user.findUnique({ where: { email } });
       if (existing) {

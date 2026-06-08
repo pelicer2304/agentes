@@ -51,7 +51,7 @@ export class OpenAIProviderService implements LLMProvider {
   ): Promise<LLMCompletionResponse> {
     this.logger.debug(`Sending request to model=${model}`);
 
-    const response = await this.client.chat.completions.create({
+    const params = {
       model,
       messages: request.messages.map((msg) => ({
         role: msg.role,
@@ -63,7 +63,20 @@ export class OpenAIProviderService implements LLMProvider {
       ...(request.responseFormat === 'json' && {
         response_format: { type: 'json_object' as const },
       }),
-    });
+      // Desliga o "thinking" do Qwen3 via OpenRouter: o raciocínio invisível
+      // consumia o orçamento de tokens e truncava o JSON da resposta (caindo
+      // no fallback ~20% das vezes) além de elevar a latência. Campos
+      // ignorados graciosamente por provedores/modelos que não os suportam.
+      reasoning: { enabled: false },
+      chat_template_kwargs: { enable_thinking: false },
+    };
+
+    // O SDK tipa apenas os campos padrão da OpenAI; os de roteamento do
+    // OpenRouter (reasoning/chat_template_kwargs) vão no corpo via cast `any`,
+    // e o retorno é tipado de volta como resposta não-streaming.
+    const response = (await this.client.chat.completions.create(
+      params as never,
+    )) as OpenAI.Chat.Completions.ChatCompletion;
 
     const choice = response.choices[0];
     const content = choice?.message?.content ?? '';

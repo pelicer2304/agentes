@@ -37,21 +37,21 @@ const DEFAULT_AGENT_NAME = 'DecodificaIA';
 // intents is preserved while the routing moves into the linear pipeline.
 
 const REPLY_PREFERENCE_CONTINUE =
-  'Combinado, seguimos por aqui mesmo. Me conta o que você gostaria de entender ou resolver agora?';
+  'Fechado, seguimos por aqui. O que você quer resolver primeiro?';
 
 const REPLY_HANDOFF_ACCEPT =
-  'Vou encaminhar para a equipe da Decodifica com um resumo do seu cenário. Assim alguém consegue avaliar o melhor caminho e te retornar com mais precisão.';
+  'Boa, vou te encaminhar pro time da Decodifica seguir daqui com você. Em breve te chamam por aqui.';
 
 const REPLY_HANDOFF_COMPLETED_ACK =
   'Seu atendimento já foi encaminhado para a equipe da Decodifica com o resumo do cenário.';
 
 const REPLY_DESISTANCE =
-  'Sem problema. Se o WhatsApp estiver gerando perda de venda ou exigindo respostas repetidas, vale uma análise depois. Estou por aqui se precisar.';
+  'Tranquilo, sem pressa. Se mais pra frente o WhatsApp começar a apertar, é só me chamar.';
 
 const REPLY_FRUSTRATION =
-  'Entendi. Vou encaminhar seu caso para a equipe te passar uma proposta direta, sem mais perguntas.';
+  'Entendi. Vou te encaminhar direto pro time resolver isso com você, sem mais pergunta.';
 
-const REPLY_ACKNOWLEDGMENT = 'Tô por aqui se precisar de mais alguma coisa.';
+const REPLY_ACKNOWLEDGMENT = 'Tô por aqui se precisar.';
 
 @Injectable()
 export class ConversationService {

@@ -106,10 +106,11 @@ export class AgentAnalysisService {
         const urg = this.cleanAnalysisValue(analysis.urgency);
         if (urg) leadUpdate.urgency = urg;
       }
-      if (analysis.decisionRole) {
-        const role = this.cleanAnalysisValue(analysis.decisionRole);
-        if (role) leadUpdate.decisionRole = role;
-      }
+      // NÃO persistimos o decisionRole inferido pela análise: a LLM tende a
+      // chutar "dono" para qualquer empreendedor que fala do próprio negócio,
+      // o que inflava o lead score (+20 "decisor") e causava saltos sem o
+      // cliente ter declarado o papel. O papel só passa a contar quando dito
+      // explicitamente (extração determinística no FactExtractor).
       if (analysis.commercialSummary) leadUpdate.summary = analysis.commercialSummary;
       if (analysis.secondaryPains?.length) leadUpdate.secondaryPains = analysis.secondaryPains;
       if (analysis.objections?.length) leadUpdate.objections = analysis.objections;
