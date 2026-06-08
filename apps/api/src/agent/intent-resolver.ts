@@ -80,6 +80,16 @@ const PREFERENCE_HUMAN_PHRASES = [
   'me transfere',
   'pode me transferir',
   'quero atendimento humano',
+  // Pedidos explícitos de encaminhamento: fecham o handoff e usam a confirmação
+  // (não o LLM, que ficava re-oferecendo "com um resumo").
+  'pode encaminhar',
+  'pode me encaminhar',
+  'me encaminha',
+  'pode me chamar',
+  'manda pra equipe',
+  'manda para equipe',
+  'pode passar pra equipe',
+  'pode passar para equipe',
 ];
 
 /**

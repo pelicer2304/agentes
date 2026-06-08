@@ -159,9 +159,12 @@ describe('IntentResolver (resolveIntent)', () => {
   });
 
   describe('handoff_accept (only while state === suggested)', () => {
-    it('"pode encaminhar sim" -> handoff_accept', () => {
+    it('"pode encaminhar sim" -> preference_human (pedido explícito fecha sempre)', () => {
+      // "pode encaminhar" é um pedido EXPLÍCITO de encaminhamento: vira
+      // preference_human e fecha o handoff mesmo sem oferta prévia detectada
+      // (ambos os caminhos confirmam o handoff com a mesma resposta).
       const r = resolveIntent('pode encaminhar sim', suggested);
-      expect(r.category).toBe('handoff_accept');
+      expect(r.category).toBe('preference_human');
     });
 
     it('"sim" -> handoff_accept', () => {

@@ -105,6 +105,17 @@ const HUMAN_PHRASES: readonly string[] = [
   'chama alguem',
   'quero falar com a equipe',
   'falar com a equipe',
+  // Pedidos EXPLÍCITOS de encaminhamento fecham o handoff sempre — não dependem
+  // de o sistema ter detectado uma oferta prévia (antes "pode encaminhar" só
+  // valia com o estado já 'suggested', e o handoff não fechava).
+  'pode encaminhar',
+  'pode me encaminhar',
+  'me encaminha',
+  'pode me chamar',
+  'manda pra equipe',
+  'manda para equipe',
+  'pode passar pra equipe',
+  'pode passar para equipe',
 ];
 
 /**

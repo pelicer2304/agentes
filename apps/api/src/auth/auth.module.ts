@@ -10,6 +10,7 @@ import { JwtStrategy } from './jwt.strategy';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { RolesGuard } from './roles.guard';
 import { AdminBootstrapService } from './admin-bootstrap.service';
+import { ContentBootstrapService } from '../common/content-bootstrap.service';
 
 @Module({
   imports: [
@@ -26,7 +27,7 @@ import { AdminBootstrapService } from './admin-bootstrap.service';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, JwtAuthGuard, RolesGuard, AdminBootstrapService],
+  providers: [AuthService, JwtStrategy, JwtAuthGuard, RolesGuard, AdminBootstrapService, ContentBootstrapService],
   exports: [AuthService, JwtModule, PassportModule, JwtAuthGuard, RolesGuard],
 })
 export class AuthModule {}

@@ -60,10 +60,11 @@ export function calculateScore(facts: KnownFacts): { score: number; temperature:
   if (facts.whatsappUsage) { score += 15; reasons.push('uso do WhatsApp explicado'); }
   if (facts.systems) { score += 15; reasons.push('sistema identificado'); }
   if (facts.decisionRole && facts.decisionRole !== 'desconhecido') { score += 20; reasons.push('decisor identificado'); }
-  // Perguntar preço sinaliza interesse, mas não é qualificação forte por si só
-  // (um curioso também pergunta). Peso moderado para não inflar o lead de frio
-  // direto para morno só por uma pergunta de valor.
-  if (facts.priceAskedCount > 0) { score += 15; reasons.push('perguntou preço'); }
+  // Preço NÃO entra no score: a contagem dispara só por a palavra "preço/valor"
+  // aparecer (mesmo quando o cliente apenas DESCREVE a dor, "recepção ocupada
+  // com preço e horário"), o que inflava o score com um falso positivo. O
+  // interesse em preço já é tratado no fluxo (intent price_question); o score
+  // fica para qualificação sólida (negócio, dor, volume, uso, sistema, decisor).
   if (facts.handoffAccepted) { score = Math.max(score, 80); reasons.push('pediu encaminhamento'); }
 
   // Handoff override

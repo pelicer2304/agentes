@@ -25,6 +25,25 @@ interface LLMQuickResponse {
   intent: string;
 }
 
+/**
+ * Configuração do NEGÓCIO injetada no prompt em runtime (vem do painel:
+ * AgentSettings + PricingConfig + KnowledgeBase). É isto que torna o agente
+ * configurável sem tocar em código: o que a empresa faz, o que NÃO prometer, o
+ * preço e o conhecimento vivem aqui, não chumbados no prompt.
+ */
+export interface BusinessContext {
+  /** O que a empresa faz / oferece (de AgentSettings.services). */
+  whatWeDo: string | null;
+  /** Base de conhecimento ativa, já formatada (de KnowledgeBase). */
+  knowledge: string | null;
+  /** Texto de preço pronto (de PricingConfig); null quando não configurado. */
+  pricingText: string | null;
+  /** Itens que o agente NUNCA pode prometer (de AgentSettings.doNotPromise). */
+  doNotPromise: string[] | null;
+  /** Tom de voz configurado (de AgentSettings.toneOfVoice). */
+  toneOfVoice: string | null;
+}
+
 @Injectable()
 export class AgentReplyService {
   private readonly logger = new Logger(AgentReplyService.name);
@@ -83,12 +102,14 @@ export class AgentReplyService {
     context: ConversationContext,
     agentName: string,
     isDirectQuestion: boolean,
+    business?: BusinessContext,
   ): Promise<QuickReplyResult> {
     const prompt = this.buildContextualPrompt(
       context.facts,
       agentName,
       context.said,
       isDirectQuestion,
+      business,
     );
     return this.runLLM(recentHistory, prompt);
   }
@@ -100,14 +121,14 @@ export class AgentReplyService {
    * message ("Estou com dificuldade..."/"dificuldades técnicas").
    */
   buildContextualFallback(facts: KnownFacts): string {
+    // Rede de segurança (só quando o LLM falha). Pergunta pra entender melhor,
+    // NUNCA afirma o que o negócio é nem o que a IA faz — evita o "chute de
+    // segmento" (ex.: tratar "ferramenta de etiquetas" como fábrica).
     if (facts.segment && facts.mainPain) {
-      return `Em ${facts.segment} isso pesa mesmo. Acontece mais em qual parte do atendimento?`;
-    }
-    if (facts.segment && facts.volume) {
-      return `Pra ${facts.segment}, esse volume não é pouco. O que mais trava hoje no WhatsApp de vocês?`;
+      return `Sobre ${facts.segment}, me conta um pouco mais: onde isso mais aperta no dia a dia de vocês?`;
     }
     if (facts.segment) {
-      return `Em ${facts.segment} o WhatsApp costuma ser o canal principal. É por onde chega a maioria dos seus clientes?`;
+      return `Entendi, ${facts.segment}. Como funciona o atendimento de vocês no WhatsApp hoje — o que mais consome tempo?`;
     }
     if (facts.mainPain) {
       return `Entendi o ponto. Me conta rapidinho o que vocês fazem, pra eu te situar melhor.`;
@@ -224,6 +245,10 @@ export class AgentReplyService {
     // sem custo perceptível — só retenta quando a primeira tentativa falhou.
     const first = await this.attemptLLM(recentHistory, prompt);
     if (first.reply && first.reply.trim() !== '') return first;
+    // Pequeno respiro antes de retentar: a falha costuma ser transiente
+    // (concorrência com a análise assíncrona, instabilidade do provedor), e o
+    // backoff aumenta bastante a chance de a 2ª tentativa dar certo.
+    await new Promise((r) => setTimeout(r, 500));
     const second = await this.attemptLLM(recentHistory, prompt);
     return second.reply && second.reply.trim() !== '' ? second : first;
   }
@@ -347,6 +372,7 @@ export class AgentReplyService {
     agentName: string,
     said?: SaidRecord,
     isDirectQuestion = false,
+    business?: BusinessContext,
   ): string {
     const knownLines: string[] = [];
     if (facts.segment) knownLines.push(`Negócio: ${facts.segment}`);
@@ -400,42 +426,85 @@ export class AgentReplyService {
         '\nMOMENTO: continue entendendo o impacto (com que frequência acontece, o que isso custa no dia a dia). Só fale em equipe quando o quadro estiver claro.';
     }
 
-    // Pergunta direta do cliente tem prioridade sobre o funil: responda primeiro.
+    // Pergunta direta tem prioridade sobre o funil: responda primeiro, sempre
+    // com base no que você SABE do negócio (blocos abaixo), nunca inventando.
     const directQuestionDirective =
-      '\nO CLIENTE PERGUNTOU ALGO. Responda curto e direto ANTES de tudo. Se for "como funciona", diga em 1-2 frases que a Decodifica monta uma IA sob medida pro negócio dele — treinada no jeito dele atender — que cuida do atendimento repetitivo no WhatsApp e passa pra uma pessoa quando precisa. Sem discurso de vendas. Só depois, se couber, UMA pergunta curta. Nunca ignore a pergunta pra seguir roteiro.';
+      '\nO CLIENTE PERGUNTOU ALGO. Responda curto e direto ANTES de tudo, com base no que está em SOBRE A EMPRESA / BASE DE CONHECIMENTO. Se a resposta não estiver lá, diga com honestidade que a equipe detalha — não invente. Sem discurso de vendas. Só depois, se couber, UMA pergunta curta. Nunca ignore a pergunta pra seguir roteiro.';
 
     const guidance = isDirectQuestion ? directQuestionDirective : nextActionNote;
 
     // Bloco "não repetir o que já foi oferecido" (demo/handoff/explicação de IA).
     const doNotReofferNote = this.buildDoNotReofferNote(said);
 
-    return `Você é ${agentName}, da Decodifica. Você fala no WhatsApp como uma pessoa de verdade: experiente, gente boa e direta. Nada de roteiro de robô.
+    return `Você é ${agentName}, o primeiro atendimento da Decodifica no WhatsApp. Você fala como uma pessoa de verdade: experiente, gente boa e direta. Nunca um roteiro de robô.
 
-A Decodifica monta uma IA sob medida pro negócio de cada cliente — treinada no jeito dele atender — que cuida do atendimento repetitivo no WhatsApp e passa pra uma pessoa quando o caso pede. Seu trabalho é entender o negócio e onde o atendimento trava, e só então mostrar onde isso pode melhorar.
+SEU PAPEL: entender o negócio da pessoa e onde o atendimento dela trava, com naturalidade, e — quando fizer sentido — conectar com alguém da equipe.
+
+REGRA Nº 1 — RESPONDA O QUE ELE DISSE: se o cliente fez uma pergunta ou levantou uma objeção ("vai substituir meus atendentes?", "tem teste grátis?", "tá caro", "e a IA erra?", "já tenho um chatbot"), RESPONDA isso de forma direta e honesta ANTES de fazer qualquer pergunta sua. NUNCA devolva uma pergunta sem antes responder a dele. Você é como um bom atendente no WhatsApp: ouve, responde, e só então continua.
+
+${this.buildBusinessBlock(business)}
 
 ${factsBlock}
 ${guidance}${doNotReofferNote}
 
 COMO VOCÊ FALA:
 - Curto. No máximo 2 frases curtas (~160 caracteres). Como se estivesse digitando no WhatsApp.
-- Reaja no tom certo do que a pessoa disse: se ela só falou o que faz, reaja leve e siga ("Boa", "Bacana", "Legal saber"); se ela contou uma DIFICULDADE, aí sim mostre que entende o aperto ("Imagino", "Pesado mesmo", "Esse perrengue é comum"). A reação tem que combinar — não diga que "aperta" se ela ainda nem contou um problema.
-- VARIE sempre. Nunca comece duas mensagens seguidas com a mesma frase ou o mesmo jeito (olhe o que você já disse antes). Repetir a abertura soa robô.
+- Reaja no tom certo do que a pessoa disse: se ela só falou o que faz, reaja leve e siga ("Boa", "Bacana"); se contou uma DIFICULDADE, mostre que entende o aperto ("Imagino", "Pesado mesmo"). A reação tem que combinar — não diga que "aperta" se ela ainda nem contou um problema.
+- VARIE sempre. Nunca comece duas mensagens seguidas do mesmo jeito (olhe o que já disse). Repetir abertura soa robô.
 - Uma pergunta por vez. Às vezes nem precisa perguntar — um comentário que mantém o papo já basta.
-- Primeiro entenda o problema. Só fale do que a IA resolve DEPOIS de saber onde trava. Não fique vendendo IA.
+- Primeiro entenda o problema. Só fale do que a IA resolve DEPOIS de saber onde trava. Não fique vendendo.
+
+ENTENDA ANTES DE AFIRMAR (o mais importante):
+- NUNCA deduza o negócio do cliente a partir de uma palavra solta. "Ferramenta de etiquetas" pode ser um SOFTWARE, não uma fábrica. "Estúdio" pode ser foto, tatuagem ou pilates. Se não está claro, PERGUNTE.
+- NUNCA descreva o que a IA vai fazer no negócio dele ("a IA puxa material, medida...") sem ter entendido o negócio. Não chute funcionalidade.
+- Só conecte o que a IA resolve depois de entender de verdade o que a pessoa faz e onde dói.
 
 O QUE NUNCA FAZER:
-- Não repita nem resuma o que o cliente disse. Nada de "Pelo que você me explicou...", "Você vende carros, recebe 100 mensagens...", "Com base nas informações...", "Diante desse cenário...", "Seu principal problema é...", "Vou encaminhar para uma análise mais precisa...".
+- Não repita nem resuma o que o cliente disse ("Pelo que você me explicou...", "Você vende carros, recebe 100 mensagens...", "Diante desse cenário...", "Seu principal problema é...").
 - Não abra com agrado de vendedor: "Entendo", "Perfeito", "Ótimo", "Show", "Certo", "Legal", "Ok", "Claro".
-- Não pergunte o que você já sabe (veja acima). Se já sabe o volume, não pergunte de novo. Se já sabe a dor, não pergunte "qual o principal desafio".
-- Não invente dado que o cliente não falou. Se não sabe o volume, NÃO diga "com esse volume" — pergunte.
-- Não fale de preço, valor ou faixa. Não prometa teste grátis, ativação na hora, integração garantida nem prazo. Integração, diga que a equipe avalia o caminho técnico.
-- Não use rótulos internos do sistema nem texto com barras (|) na resposta. Fale natural.
-- Sem emoji. Sem ponto de exclamação. Sem texto longo. Sem "sem erros"/"zero erros".
-- Não ofereça falar com a equipe cedo. Só quando já entendeu onde o atendimento trava — e de forma natural, sem resumo.
-- Se perguntarem se a IA erra: diga uma vez que ela trabalha com regras e limites e, quando foge disso, passa pra um humano. Não repita.
+- Não pergunte o que você já sabe (veja os fatos). Não invente dado que o cliente não falou.
+- Preço: use só o que está em PREÇO acima; nunca invente outro valor. Sem preço configurado, diga que depende do escopo e ofereça a equipe.
+- Se pedirem algo da lista NUNCA PROMETA (ex.: teste grátis), diga CLARO que não trabalha com isso e ofereça o caminho real — não desvie nem enrole. Integração: a equipe avalia o caminho técnico, sem garantir de cara.
+- Não use rótulos internos nem texto com barras (|). Sem emoji, sem exclamação, sem texto longo.
+- Não ofereça a equipe cedo. Só quando já entendeu onde trava — de forma natural, sem resumo.
 
 Responda em JSON:
 {"reply":"sua mensagem","stage":"abertura|descoberta|mapeamento_de_dores|diagnostico_operacional|explicacao_solucao|conversao|handoff_humano","intent":"vendas|suporte|agendamento|duvidas|orcamento|integracao|curiosidade|outro"}`;
+  }
+
+  /**
+   * Monta o bloco de NEGÓCIO do prompt a partir da configuração do painel. É o
+   * que substitui os textos e valores antes chumbados: o que a empresa faz, o
+   * conhecimento, o preço e as não-promessas passam a vir daqui. Sem config,
+   * usa um mínimo genérico para o agente não ficar mudo.
+   */
+  private buildBusinessBlock(business?: BusinessContext): string {
+    const parts: string[] = [];
+
+    parts.push(
+      business?.whatWeDo
+        ? `SOBRE A EMPRESA (use isto, não invente):\n${business.whatWeDo}`
+        : 'SOBRE A EMPRESA: a Decodifica desenvolve um agente de IA sob medida pro negócio de cada cliente, que cuida do atendimento repetitivo no WhatsApp e passa pra uma pessoa quando o caso pede.',
+    );
+
+    if (business?.knowledge) {
+      parts.push(
+        `BASE DE CONHECIMENTO (responda com base nisto; se não estiver aqui, diga que a equipe detalha):\n${business.knowledge}`,
+      );
+    }
+    if (business?.pricingText) {
+      parts.push(
+        `PREÇO (se perguntarem; nunca invente outro valor): ${business.pricingText}`,
+      );
+    }
+    if (business?.doNotPromise && business.doNotPromise.length > 0) {
+      parts.push(`NUNCA PROMETA: ${business.doNotPromise.join('; ')}.`);
+    }
+    if (business?.toneOfVoice) {
+      parts.push(`TOM DE VOZ: ${business.toneOfVoice}`);
+    }
+
+    return parts.join('\n\n');
   }
 
   /**

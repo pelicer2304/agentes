@@ -77,8 +77,9 @@ export class AgentAnalysisService {
 
       // Update Lead
       const leadUpdate: Record<string, unknown> = {};
-      if (analysis.leadScore > 0) leadUpdate.leadScore = analysis.leadScore;
-      if (analysis.temperature) leadUpdate.temperature = analysis.temperature;
+      // NÃO sobrescrevemos leadScore/temperature com a análise: a LLM exagera
+      // (cravava 100 sem motivo). O score/temperatura do lead vêm do cálculo
+      // determinístico do pipeline (a cada turno), que é coerente e não pula.
       // The background analysis MUST NOT escalate the lead to a human handoff.
       // Handoff is owned exclusively by the deterministic pipeline (an explicit
       // user request or an accepted offer). If the analysis LLM were allowed to
@@ -98,10 +99,10 @@ export class AgentAnalysisService {
       if (analysis.primaryPain) leadUpdate.mainPain = analysis.primaryPain;
       if (analysis.recommendedService) leadUpdate.recommendedService = analysis.recommendedService;
       if (analysis.whatsappUsage) leadUpdate.whatsappUsage = analysis.whatsappUsage;
-      if (analysis.estimatedVolume) {
-        const vol = this.cleanAnalysisValue(analysis.estimatedVolume);
-        if (vol) leadUpdate.estimatedVolume = vol;
-      }
+      // NÃO persistimos o volume INFERIDO pela análise: a LLM "chutava" um
+      // volume que o cliente não deu, inflando o score (+15 "volume informado").
+      // O volume só conta quando o cliente realmente o informa (extração
+      // determinística no FactExtractor).
       if (analysis.urgency) {
         const urg = this.cleanAnalysisValue(analysis.urgency);
         if (urg) leadUpdate.urgency = urg;

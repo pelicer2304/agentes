@@ -10,6 +10,7 @@ import { ContextTrackerService } from '../agent/context-tracker';
 import { HandoffManagerService } from '../agent/handoff-manager';
 import { ResponseGuardService } from '../agent/response-guard.service';
 import { PricingConfigService } from '../inbound/pricing-config.service';
+import { KnowledgeService } from '../knowledge/knowledge.service';
 import { classifyEdgeInput, edgeReply } from '../agent/edge-input';
 
 /**
@@ -110,6 +111,10 @@ describe('ConversationService', () => {
       }),
     };
 
+    const mockKnowledge = {
+      findAll: jest.fn().mockResolvedValue({}),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConversationService,
@@ -122,6 +127,7 @@ describe('ConversationService', () => {
         HandoffManagerService,
         ResponseGuardService,
         { provide: PricingConfigService, useValue: mockPricingConfig },
+        { provide: KnowledgeService, useValue: mockKnowledge },
       ],
     }).compile();
 

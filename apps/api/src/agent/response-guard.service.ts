@@ -120,25 +120,14 @@ const HANDOFF_QUESTION_WORDS: string[] = [
   'interessa?',
 ];
 
-const SEGMENT_TEMPLATES: Record<string, string> = {
-  clinica:
-    'Com a agenda cheia e a equipe no limite, dá pra tirar bastante peso do atendimento. Quer que eu te encaminhe pra alguém da equipe olhar isso com você?',
-  etiqueta:
-    'Dá pra IA já puxar material, medida, quantidade e prazo antes do vendedor entrar. Quer que eu te encaminhe pra equipe ver esse fluxo com você?',
-  restaurante:
-    'Com esse movimento de pedidos, dá pra organizar cardápio, pedido e dúvida antes de chegar em vocês. Quer que eu te encaminhe pra equipe olhar isso?',
-  academia:
-    'Dúvida de plano, horário e matrícula a IA já resolve na entrada. Quer que eu te encaminhe pra equipe ver isso com você?',
-  contabil:
-    'Dá pra IA segurar as perguntas repetidas de prazo e documento e organizar os pedidos. Quer que eu te encaminhe pra equipe olhar isso?',
-  imobiliaria:
-    'Com esse tanto de lead, dá pra filtrar e responder rápido antes de passar pro corretor. Quer que eu te encaminhe pra equipe ver isso com você?',
-  petshop:
-    'Banho, tosa e agendamento a IA já organiza e confirma sozinha. Quer que eu te encaminhe pra equipe olhar isso?',
-  loja:
-    'Com esse tanto de pergunta sobre produto, dá pra responder na hora e segurar o cliente. Quer que eu te encaminhe pra equipe ver isso com você?',
+// Oferta de handoff NEUTRA. Antes existia um template por segmento que afirmava
+// o que a IA faria no negócio do cliente (ex.: "puxar material, medida...") — e
+// isso CHUTAVA o negócio (o caso real: "ferramenta de decodificar ZPL" tratada
+// como fábrica de etiqueta). Agora a oferta não presume nada; entender o negócio
+// é papel do agente (LLM) com a conversa e a base de conhecimento configurada.
+const SEGMENT_TEMPLATES = {
   fallback:
-    'Dá pra tirar bastante peso do seu WhatsApp e organizar melhor o atendimento. Quer que eu te encaminhe pra alguém da equipe olhar esse fluxo com você?',
+    'Pelo que você me contou, acho que vale alguém da equipe olhar seu caso com você. Quer que eu te encaminhe?',
 };
 
 const IA_EXPLANATION_PHRASE =
@@ -279,48 +268,9 @@ function isIsolatedHandoff(reply: string): boolean {
   return true;
 }
 
-function getSegmentTemplate(segment: string | null): string {
-  if (!segment) return SEGMENT_TEMPLATES.fallback;
-
-  const lower = segment.toLowerCase();
-
-  if (lower.includes('clinica') || lower.includes('clínica')) {
-    return SEGMENT_TEMPLATES.clinica;
-  }
-  if (
-    lower.includes('etiqueta') ||
-    lower.includes('fábrica') ||
-    lower.includes('fabrica')
-  ) {
-    return SEGMENT_TEMPLATES.etiqueta;
-  }
-  if (lower.includes('restaurante')) {
-    return SEGMENT_TEMPLATES.restaurante;
-  }
-  if (lower.includes('academia') || lower.includes('fitness')) {
-    return SEGMENT_TEMPLATES.academia;
-  }
-  if (
-    lower.includes('contabil') ||
-    lower.includes('escritório') ||
-    lower.includes('escritorio')
-  ) {
-    return SEGMENT_TEMPLATES.contabil;
-  }
-  if (
-    lower.includes('imobiliária') ||
-    lower.includes('imobiliaria') ||
-    lower.includes('corretor')
-  ) {
-    return SEGMENT_TEMPLATES.imobiliaria;
-  }
-  if (lower.includes('pet shop') || lower.includes('pet')) {
-    return SEGMENT_TEMPLATES.petshop;
-  }
-  if (lower.includes('loja') || lower.includes('moda')) {
-    return SEGMENT_TEMPLATES.loja;
-  }
-
+function getSegmentTemplate(_segment: string | null): string {
+  // Oferta de handoff neutra, independente de segmento — não presume nada sobre
+  // o negócio do cliente (ver comentário em SEGMENT_TEMPLATES).
   return SEGMENT_TEMPLATES.fallback;
 }
 
@@ -533,6 +483,17 @@ const ECHO_CONNECTORS = [
 ];
 
 /**
+ * Remove um conector inicial órfão ("Mas", "E", "Então"...) que sobra quando a
+ * cláusula-eco é cortada e a frase seguinte começava com esse conector — senão
+ * a resposta vira "Mas como está o atendimento?".
+ */
+function stripLeadingConnector(text: string): string {
+  return text
+    .replace(/^(mas sim|e sim|mas|ent[ãa]o|por[ée]m|pois|e)\b[\s,]*/i, '')
+    .trim();
+}
+
+/**
  * Strip a leading "echo" clause that merely restates what the client just said
  * (e.g. "Com vendas de etiquetas e problemas no atendimento, me conta ..." or
  * "Vendo carros. Como ..."), which reads as redundant. Handles two shapes:
@@ -563,7 +524,7 @@ function stripLeadingEcho(reply: string, userMessage: string): string {
         );
         const shared = countSharedWords(lead, msgWords);
         if ((startsWithConnector && shared >= 1) || shared >= 2) {
-          return capitalizeFirst(rest);
+          return capitalizeFirst(stripLeadingConnector(rest));
         }
       }
     }
@@ -575,7 +536,7 @@ function stripLeadingEcho(reply: string, userMessage: string): string {
     const lead = m[1];
     const rest = m[2].trim();
     if (rest.length >= 8 && countSharedWords(lead, msgWords) >= 2) {
-      return capitalizeFirst(rest);
+      return capitalizeFirst(stripLeadingConnector(rest));
     }
   }
 

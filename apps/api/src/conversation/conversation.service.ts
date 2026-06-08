@@ -1,7 +1,8 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AgentReplyService } from '../agent/agent-reply.service';
+import { AgentReplyService, BusinessContext } from '../agent/agent-reply.service';
+import { KnowledgeService } from '../knowledge/knowledge.service';
 import { AgentAnalysisService } from '../agent/agent-analysis.service';
 import { ContextTrackerService } from '../agent/context-tracker';
 import { HandoffManagerService } from '../agent/handoff-manager';
@@ -57,6 +58,16 @@ const REPLY_ACKNOWLEDGMENT = 'Tô por aqui se precisar.';
 export class ConversationService {
   private readonly logger = new Logger(ConversationService.name);
 
+  /**
+   * Conversas com uma análise assíncrona já em andamento. A análise é pesada
+   * (LLM de ~900 tokens, 15-25s) e, se disparada a cada turno, várias rodam em
+   * paralelo e disputam o provedor com a RESPOSTA ao cliente — travando o turno
+   * (latências de 20s+) e forçando fallback. Garantimos no máximo uma análise
+   * por conversa de cada vez: enquanto uma roda, os turnos seguintes não
+   * disparam outra.
+   */
+  private readonly analysisInFlight = new Set<string>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentReply: AgentReplyService,
@@ -65,6 +76,7 @@ export class ConversationService {
     private readonly handoffManager: HandoffManagerService,
     private readonly responseGuard: ResponseGuardService,
     private readonly pricingConfig: PricingConfigService,
+    private readonly knowledge: KnowledgeService,
   ) {}
 
   /**
@@ -329,12 +341,16 @@ export class ConversationService {
       case 'direct_question':
       case 'general':
       default: {
-        // 9a. LLM composition (R1) — the only LLM entry point.
+        // 9a. LLM composition (R1) — the only LLM entry point. Injeta a config
+        //     do negócio (settings + pricing + base de conhecimento) no prompt,
+        //     pra o agente raciocinar com o que a empresa configurou, sem chumbo.
+        const business = await this.buildBusinessContext(settings, pricing);
         const llmResult = await this.agentReply.composeReply(
           history,
           context,
           agentName,
           resolved.isDirectQuestion,
+          business,
         );
         usedLLM = true;
         stage = llmResult.stage || stage;
@@ -449,13 +465,17 @@ export class ConversationService {
       }
     }
 
-    // 15. Fire async analysis for LLM-path turns only (preserved exactly).
-    if (usedLLM) {
+    // 15. Fire async analysis for LLM-path turns only — but NEVER concurrently
+    //     for the same conversation (debounce), so it can't engasgar a próxima
+    //     resposta ao cliente.
+    if (usedLLM && !this.analysisInFlight.has(conversationId)) {
+      this.analysisInFlight.add(conversationId);
       this.agentAnalysis
         .runAsync(conversationId, conversation.leadId, history, stage)
         .catch((err) => {
           this.logger.error(`[${conversationId}] Async analysis error: ${err.message}`);
-        });
+        })
+        .finally(() => this.analysisInFlight.delete(conversationId));
     }
 
     // 16. Return response.
@@ -712,6 +732,43 @@ export class ConversationService {
 
     // Create a fresh conversation
     return this.createConversation();
+  }
+
+  /**
+   * Monta o BusinessContext injetado no prompt do agente a partir da
+   * configuração do painel (AgentSettings + PricingConfig + KnowledgeBase). É
+   * isto que torna o agente configurável sem tocar em código: o que a empresa
+   * faz, o conhecimento, o preço e as não-promessas passam a vir daqui.
+   */
+  private async buildBusinessContext(
+    settings: AgentSettingsInput,
+    pricing: { pricingRangeEnabled: boolean; pricingText: string },
+  ): Promise<BusinessContext> {
+    const services = settings.services ?? [];
+    const whatWeDo =
+      services.length > 0 ? services.map((s) => `- ${s}`).join('\n') : null;
+
+    const grouped = await this.knowledge.findAll();
+    const kbLines: string[] = [];
+    for (const items of Object.values(grouped)) {
+      for (const item of items) {
+        if (item.active) kbLines.push(`- ${item.title}: ${item.content}`);
+      }
+    }
+    const knowledge = kbLines.length > 0 ? kbLines.join('\n') : null;
+
+    const pricingText =
+      pricing.pricingRangeEnabled && pricing.pricingText
+        ? pricing.pricingText
+        : null;
+
+    return {
+      whatWeDo,
+      knowledge,
+      pricingText,
+      doNotPromise: settings.doNotPromise ?? null,
+      toneOfVoice: settings.toneOfVoice ?? null,
+    };
   }
 
   /**
