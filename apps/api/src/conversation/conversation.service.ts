@@ -52,7 +52,7 @@ const REPLY_HANDOFF_OFFER_LIST =
   'gente já monta a melhor estratégia pro seu caso.';
 
 const REPLY_HANDOFF_COMPLETED_ACK =
-  'Seu atendimento já foi encaminhado para a equipe da Decodifica com o resumo do cenário.';
+  'Prontinho, seu atendimento já foi encaminhado para a equipe da Decodifica. Se surgir qualquer dúvida nova, é só me chamar por aqui.';
 
 const REPLY_DESISTANCE =
   'Tranquilo, sem pressa. Se mais pra frente o WhatsApp começar a apertar, é só me chamar.';
@@ -397,25 +397,37 @@ export class ConversationService {
       stage = 'handoff_humano';
     }
 
+    // Encerramento silencioso: depois de já ter confirmado o encaminhamento
+    // ("já foi encaminhado..."), um novo "ok/beleza/valeu" NÃO repete a
+    // despedida — o bot encerra em SILÊNCIO (não envia nada). Perguntas novas
+    // seguem sendo respondidas normalmente (não caem aqui).
+    const silentClose =
+      routedIntent === 'handoff_completed_ack' &&
+      history.some(
+        (m) => m.role === 'assistant' && m.content.includes('já foi encaminhado'),
+      );
+
     // 10. Response guard (R1.4, R2, R5.4, R6, R8): the single post-processor.
-    const guardInput: GuardInput = {
-      reply: finalReply,
-      userMessage: rawContent,
-      intent,
-      context,
-      pricing: {
-        pricingRangeEnabled: pricing.pricingRangeEnabled,
-        startingPriceText: pricing.pricingStartingAtText,
-      },
-    };
-    const guardOutput = this.responseGuard.guard(guardInput);
-    finalReply = guardOutput.reply;
-    if (guardOutput.changed) {
-      this.logger.debug(`[${conversationId}] Guard applied: ${guardOutput.guardReason}`);
-    }
-    if (!finalReply || finalReply.trim() === '') {
-      finalReply = this.agentReply.buildContextualFallback(facts);
-      this.logger.warn(`[${conversationId}] Reply empty after guard, using contextual fallback`);
+    if (!silentClose) {
+      const guardInput: GuardInput = {
+        reply: finalReply,
+        userMessage: rawContent,
+        intent,
+        context,
+        pricing: {
+          pricingRangeEnabled: pricing.pricingRangeEnabled,
+          startingPriceText: pricing.pricingStartingAtText,
+        },
+      };
+      const guardOutput = this.responseGuard.guard(guardInput);
+      finalReply = guardOutput.reply;
+      if (guardOutput.changed) {
+        this.logger.debug(`[${conversationId}] Guard applied: ${guardOutput.guardReason}`);
+      }
+      if (!finalReply || finalReply.trim() === '') {
+        finalReply = this.agentReply.buildContextualFallback(facts);
+        this.logger.warn(`[${conversationId}] Reply empty after guard, using contextual fallback`);
+      }
     }
 
     // 11. Handoff state + score resolution (R7, R9, R10).
@@ -455,15 +467,18 @@ export class ConversationService {
       `[${conversationId}] Reply in ${totalMs}ms | intent=${intent} | llm=${usedLLM} | handoff=${nextHandoffState} | score=${finalScore} | temp=${finalTemperature}`,
     );
 
-    // 12. Persist assistant message.
-    const assistantMessage = await this.prisma.message.create({
-      data: {
-        conversationId,
-        role: 'assistant',
-        direction: 'outbound',
-        content: finalReply,
-      },
-    });
+    // 12. Persist assistant message (no encerramento silencioso não há mensagem:
+    //     o engine devolve message=null e o inbound não envia nada).
+    const assistantMessage = silentClose
+      ? null
+      : await this.prisma.message.create({
+          data: {
+            conversationId,
+            role: 'assistant',
+            direction: 'outbound',
+            content: finalReply,
+          },
+        });
 
     // 13. Persist newly established facts + score to the lead every turn (R9.4).
     try {

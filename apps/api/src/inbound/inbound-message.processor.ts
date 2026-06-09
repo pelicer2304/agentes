@@ -130,6 +130,7 @@ interface BufferedTurn {
 /** Internal result of {@link invokeEngineWithTimeout}. */
 type EngineInvocation =
   | { status: 'ok'; reply: string; outboundMessageId: string; qualification: EngineQualification }
+  | { status: 'silent'; qualification: EngineQualification }
   | { status: 'failed'; reason: EngineFailureReason };
 
 /**
@@ -418,6 +419,22 @@ export class InboundMessageProcessor {
         leadId: context.leadId,
         payload: { externalMessageId: normalized.externalMessageId },
       });
+
+      // Encerramento silencioso: o engine pediu para NÃO responder (um "ok/
+      // beleza" repetido após o handoff). O inbound já foi salvo; finaliza sem
+      // enviar nada — o bot não fica repetindo a despedida.
+      if (invocation.status === 'silent') {
+        await this.finalizeWebhookLog(webhookLogId, {
+          eventType: 'silent_close',
+          instanceName,
+          externalMessageId: normalized.externalMessageId,
+          phone,
+          processed: true,
+          error: null,
+        });
+        this.emitMessageLog(metrics, processStart);
+        return { httpStatus: 200, action: 'ignored' };
+      }
 
       // 10. Determine the reply text (engine reply or contextual fallback).
       let reply: string;
@@ -1193,6 +1210,12 @@ export class InboundMessageProcessor {
         },
       });
 
+      // Encerramento silencioso (ack repetido pós-handoff): o inbound já foi
+      // salvo/carimbado acima; finaliza sem enviar nada.
+      if (invocation.status === 'silent') {
+        return;
+      }
+
       let reply: string;
       let outboundMessageId: string | null = null;
       let qualification: EngineQualification | null = null;
@@ -1340,14 +1363,20 @@ export class InboundMessageProcessor {
           conversationId,
           content,
         );
+        const qualification = {
+          shouldHandoff: Boolean(result.qualification?.shouldHandoff),
+          status: String(result.qualification?.status ?? ''),
+        };
+        // Encerramento silencioso: engine não produziu mensagem (não repete a
+        // despedida pós-handoff). Sinaliza para o chamador não enviar nada.
+        if (!result.message) {
+          return { status: 'silent', qualification };
+        }
         return {
           status: 'ok',
           reply: result.message.content,
           outboundMessageId: result.message.id,
-          qualification: {
-            shouldHandoff: Boolean(result.qualification?.shouldHandoff),
-            status: String(result.qualification?.status ?? ''),
-          },
+          qualification,
         };
       } catch (err) {
         this.logger.error(
