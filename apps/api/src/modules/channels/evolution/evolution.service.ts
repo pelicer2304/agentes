@@ -240,16 +240,15 @@ export class EvolutionService {
    * `key` da mensagem (id/remoteJid). Retorna `{ base64, mimetype }` ou um erro
    * key-safe — o chamador trata a falha caindo no aviso de mídia.
    */
-  async getMediaBase64(key: {
-    id?: string;
-    remoteJid?: string;
-    fromMe?: boolean;
+  async getMediaBase64(messageObject: {
+    key?: { id?: string; remoteJid?: string; fromMe?: boolean };
+    message?: unknown;
   }): Promise<EvolutionResult<{ base64: string; mimetype: string }>> {
     return this.request(
       {
         method: 'POST',
         path: `/chat/getBase64FromMediaMessage/${this.instance}`,
-        body: { message: { key }, convertToMp4: false },
+        body: { message: messageObject, convertToMp4: false },
         retries: 1,
       },
       (data) => {

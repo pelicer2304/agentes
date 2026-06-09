@@ -360,10 +360,19 @@ export class InboundMessageProcessor {
       //     fosse texto, pra o agente "ouvir" o cliente. Em qualquer falha
       //     (sem chave, download/transcrição falhou) segue como mídia não
       //     suportada — o cliente recebe o aviso de texto, nada quebra.
-      if (normalized.messageType === 'audio' && this.transcription.isEnabled) {
-        const transcript = await this.transcribeInboundAudio(normalized);
-        if (transcript) {
-          normalized = { ...normalized, content: transcript, messageType: 'text' };
+      if (normalized.messageType === 'audio') {
+        if (!this.transcription.isEnabled) {
+          this.logger.warn(
+            'Audio recebido, mas transcricao DESABILITADA (GROQ_API_KEY ausente na env do servico api).',
+          );
+        } else {
+          const transcript = await this.transcribeInboundAudio(normalized);
+          if (transcript) {
+            this.logger.log(
+              `Audio transcrito (${transcript.length} chars), seguindo o fluxo como texto.`,
+            );
+            normalized = { ...normalized, content: transcript, messageType: 'text' };
+          }
         }
       }
 
@@ -932,25 +941,49 @@ export class InboundMessageProcessor {
     inbound: InboundMessage,
   ): Promise<string | null> {
     try {
-      const payload = inbound.rawPayload as
-        | {
-            data?: {
-              key?: { id?: string; remoteJid?: string; fromMe?: boolean };
-              message?: { audioMessage?: { mimetype?: string } };
-            };
-          }
-        | undefined;
-      const key = payload?.data?.key;
-      if (!key?.id) return null;
+      const data = (
+        inbound.rawPayload as
+          | {
+              data?: {
+                key?: { id?: string; remoteJid?: string; fromMe?: boolean };
+                message?: { audioMessage?: { mimetype?: string } };
+              };
+            }
+          | undefined
+      )?.data;
+      const key = data?.key;
+      const message = data?.message;
+      if (!key?.id) {
+        this.logger.warn('Audio: sem message key no payload — abortando transcricao.');
+        return null;
+      }
 
-      const media = await this.evolution.getMediaBase64(key);
-      if (!media.ok || !media.data.base64) return null;
+      // O endpoint da Evolution descriptografa o .enc; passamos a mensagem
+      // INTEIRA (key + message), não só a key, pra cobrir os casos em que o
+      // store não tem a midia em cache.
+      const media = await this.evolution.getMediaBase64({ key, message });
+      if (!media.ok) {
+        this.logger.warn(`Audio: download da midia falhou — ${media.error}`);
+        return null;
+      }
+      if (!media.data.base64) {
+        this.logger.warn('Audio: download retornou base64 vazio.');
+        return null;
+      }
 
       const mimetype =
         media.data.mimetype ||
-        payload?.data?.message?.audioMessage?.mimetype ||
+        data?.message?.audioMessage?.mimetype ||
         'audio/ogg';
-      return await this.transcription.transcribe(media.data.base64, mimetype);
+      const text = await this.transcription.transcribe(
+        media.data.base64,
+        mimetype,
+      );
+      if (!text) {
+        this.logger.warn('Audio: transcricao do Groq voltou vazia.');
+        return null;
+      }
+      return text;
     } catch (err) {
       this.logger.warn(
         `Audio transcription pipeline error: ${
