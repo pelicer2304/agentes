@@ -275,6 +275,10 @@ export class FactExtractorService {
       'deseja o contato', 'deseja o encaminhamento', 'posso conectar você',
       'posso pedir', 'quer que a equipe', 'quer seguir',
       'interessa', 'posso encaminhar para', 'posso encaminhar seu',
+      // Oferta determinística do pedido da lista (REPLY_HANDOFF_OFFER_LIST):
+      // sem isto o estado nunca virava 'suggested' e o handoff não fechava.
+      // Frases específicas dessa oferta (evita falso positivo em preço etc.).
+      'antes de te encaminhar', 'te conectar com o nosso time',
     ];
     return history.some(
       (msg) => msg.role === 'assistant' && offerPhrases.some((p) => msg.content.toLowerCase().includes(p)),

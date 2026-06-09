@@ -96,10 +96,14 @@ export class HandoffManagerService {
     }
 
     // 4b. Depois de OFERECER o encaminhamento (estado 'suggested'), a próxima
-    //     resposta conversacional do cliente é a lista de problemas que pedimos
-    //     — confirma o handoff e leva o cenário pro time. (Perguntas diretas e
-    //     preço têm intent próprio e não caem aqui, então seguem respondidas.)
-    if (intent === 'general' && current === 'suggested') {
+    //     resposta substantiva do cliente é a lista de problemas que pedimos —
+    //     confirma o handoff e leva o cenário pro time. Cobre tanto descrição
+    //     ('general') quanto frases que o resolver marca como 'direct_question'
+    //     (ex.: "quero um agente que..."). Preço segue com intent próprio.
+    if (
+      (intent === 'general' || intent === 'direct_question') &&
+      current === 'suggested'
+    ) {
       return this.toAccepted(current);
     }
 
