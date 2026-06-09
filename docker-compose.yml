@@ -156,6 +156,9 @@ services:
       MODEL_NAME: openai/gpt-4o-mini
       LLM_MODEL_FALLBACK: google/gemini-2.5-flash
 
+      # --- Transcricao de audio (Groq Whisper) — vem da env do EasyPanel ---
+      GROQ_API_KEY: "${GROQ_API_KEY}"
+
       # --- Evolution API (internal service URL on the compose network) ---
       EVOLUTION_API_URL: http://evolution-api:8080
       EVOLUTION_API_KEY: "ed92b0d34980aef863449440d94a4a486dea1c1d8d395e77"
