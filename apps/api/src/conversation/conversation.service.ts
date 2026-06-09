@@ -260,6 +260,11 @@ export class ConversationService {
     );
     const resolved = resolveIntent(rawContent, { hasFacts, handoffState });
     const intent: IntentCategory = resolved.category;
+    // Um "oi"/cumprimento DEPOIS da abertura não repete a saudação: a IA lê todo
+    // o histórico e conduz com naturalidade (caminho 'general' = LLM). Só o
+    // primeiro cumprimento é tratado como abertura.
+    const routedIntent: IntentCategory =
+      intent === 'greeting' && facts.messageCount > 1 ? 'general' : intent;
 
     // 8. Resolve the handoff transition once (used both for the deterministic
     //    handoff replies and for the final state). Frustration is treated like
@@ -296,7 +301,7 @@ export class ConversationService {
     let usedLLM = false;
     let stage = conversation.stage || 'descoberta';
 
-    switch (intent) {
+    switch (routedIntent) {
       case 'price_question':
         finalReply = composePriceAnswer({
           pricingRangeEnabled: pricing.pricingRangeEnabled,

@@ -55,11 +55,27 @@ export class ContentBootstrapService implements OnModuleInit {
     }
   }
 
+  /** Saudação curta que vigorou brevemente; migrada para a completa no boot. */
+  private static readonly OLD_SHORT_GREETING =
+    'Oi! Aqui é o DecodificaIA, da Decodifica. Me conta rapidinho: o que vocês fazem e como usam o WhatsApp no dia a dia?';
+
   private async ensureAgentSettings(): Promise<void> {
     const existing = await this.prisma.agentSettings.findFirst();
-    if (existing) return;
-    await this.prisma.agentSettings.create({ data: SEED_AGENT_SETTINGS });
-    this.logger.log('Seeded default agent settings on boot.');
+    if (!existing) {
+      await this.prisma.agentSettings.create({ data: SEED_AGENT_SETTINGS });
+      this.logger.log('Seeded default agent settings on boot.');
+      return;
+    }
+    // Migração pontual e segura: troca a saudação curta antiga pela de abertura
+    // completa. Só age se o valor for exatamente o antigo — nunca sobrescreve
+    // uma saudação que o admin tenha personalizado no painel.
+    if (existing.initialMessage === ContentBootstrapService.OLD_SHORT_GREETING) {
+      await this.prisma.agentSettings.update({
+        where: { id: existing.id },
+        data: { initialMessage: SEED_AGENT_SETTINGS.initialMessage },
+      });
+      this.logger.log('Migrated initial greeting to the full version on boot.');
+    }
   }
 
   private async ensurePricing(): Promise<void> {

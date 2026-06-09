@@ -27,10 +27,10 @@ export const SEED_PRICING_CONFIG = {
 
 export const SEED_AGENT_SETTINGS = {
   agentName: 'DecodificaIA',
-  // Saudação humana e curta (linguagem de WhatsApp), não a antiga apresentação
-  // longa de "atendente inteligente".
+  // Saudação de abertura completa (só aparece UMA vez; um "oi" seguinte cai no
+  // LLM, que lê o histórico e conduz sem repetir).
   initialMessage:
-    'Oi! Aqui é o DecodificaIA, da Decodifica. Me conta rapidinho: o que vocês fazem e como usam o WhatsApp no dia a dia?',
+    'Olá. Sou o DecodificaIA, atendente inteligente da Decodifica. Vou te ajudar a entender quais partes do seu atendimento podem ser automatizadas com IA de forma humanizada. Para começar, me conta qual é o seu negócio e como vocês usam o WhatsApp hoje.',
   toneOfVoice:
     'Humano e direto, linguagem de WhatsApp. Conversa como uma pessoa experiente: ouve, reage ao que foi dito, responde primeiro o que o cliente perguntou e faz no máximo uma pergunta por vez. Sem emoji, sem exclamação, sem textão, sem soar formulário nem vendedor insistente.',
   services: [
