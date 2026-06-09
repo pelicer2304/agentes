@@ -172,11 +172,27 @@ export class FactExtractorService {
   }
 
   private extractVolume(history: ConversationMessage[]): string | null {
-    const volumePattern = /(\d+)\s*(por dia|mensagens|pedidos|atendimentos|por semana|clientes)/i;
-    for (const msg of history) {
+    const volumePattern =
+      /(\d+)\s*(por dia|mensagens|pedidos|atendimentos|contatos|por semana|clientes|dia)/i;
+    // Pergunta de volume feita pelo assistente — para captar a resposta SECA
+    // ("umas 200", "200") que vem logo depois, sem repetir a unidade.
+    const askedVolume =
+      /quant[ao]s?.*(mensage|contato|atendimento|pedido|cliente|por dia)|volume|por dia/i;
+    for (let i = 0; i < history.length; i++) {
+      const msg = history[i];
       if (msg.role !== 'user') continue;
-      const match = msg.content.match(volumePattern);
-      if (match) return msg.content;
+      // 1) número já acompanhado de unidade na própria fala.
+      if (volumePattern.test(msg.content)) return msg.content;
+      // 2) número "solto" logo após o assistente perguntar o volume.
+      const prev = history[i - 1];
+      if (
+        prev &&
+        prev.role === 'assistant' &&
+        askedVolume.test(prev.content) &&
+        /\b\d{1,6}\b/.test(msg.content)
+      ) {
+        return msg.content;
+      }
     }
     return null;
   }
