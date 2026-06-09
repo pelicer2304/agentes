@@ -129,7 +129,11 @@ const HANDOFF_ACCEPT_SHORT = ['sim', 'pode', 'manda'];
 
 const DESISTANCE_PHRASES = [
   'deixa pra lá', 'deixa pra la', 'esquece', 'não quero mais', 'nao quero mais',
-  'não preciso', 'nao preciso', 'vou procurar outro',
+  // "não preciso" genérico saía como desistência em frases POSITIVAS ("não
+  // preciso contratar muita gente se treinar a IA") — só conta como desistência
+  // nas formas explícitas abaixo.
+  'não preciso mais', 'nao preciso mais', 'não preciso disso', 'nao preciso disso',
+  'vou procurar outro',
   'não tenho interesse', 'nao tenho interesse', 'sem interesse',
 ];
 

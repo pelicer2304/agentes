@@ -408,7 +408,7 @@ export class AgentReplyService {
     let nextActionNote = '';
     if (facts.handoffAccepted || facts.handoffCompleted) {
       nextActionNote =
-        '\nMOMENTO: o cliente JÁ foi encaminhado pra equipe. Agora é só responder as dúvidas dele de forma DIRETA e útil, com o que você sabe — sem ficar perguntando e sem re-oferecer encaminhamento. A equipe assume daqui.';
+        '\nMOMENTO: o cliente JÁ foi encaminhado pra equipe. Responda as dúvidas dele de forma DIRETA e útil, com o que você sabe — sem ficar perguntando e sem re-oferecer. Se ele perguntar do próximo passo ("a equipe vai me chamar?"), confirme com clareza: SIM, em breve alguém da equipe fala com ele por aqui no WhatsApp.';
     } else if (qualified && questionCount >= 4) {
       nextActionNote =
         '\nMOMENTO: já dá pra entender onde o atendimento trava. Faça uma transição leve e natural pra equipe, do jeito que uma pessoa falaria — ex: "Boa, agora deu pra entender melhor onde tá travando. Acho que vale alguém da equipe olhar esse fluxo com você. Quer?". NÃO faça resumo dos dados dele.';
