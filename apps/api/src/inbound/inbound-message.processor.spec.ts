@@ -117,17 +117,17 @@ describe('InboundMessageProcessor - applyHandoffSideEffects', () => {
     expect(mockPrisma.conversation.update).toHaveBeenCalledTimes(1);
   });
 
-  it('pauses the bot when BOT_PAUSE_ON_HANDOFF is true (Req 10.3, 11.2)', async () => {
+  it('NÃO pausa o bot no handoff — segue ativo até um humano assumir', async () => {
+    // O handoff não silencia mais o bot: o cliente pode ter novas dúvidas e o
+    // agente continua respondendo até o /assumir do inbox setar botPaused.
     mockConfig.botPauseOnHandoff = true;
     const context = baseContext();
 
     await invoke(context, { shouldHandoff: true, status: 'chamar_humano' });
 
-    expect(mockPrisma.conversation.update).toHaveBeenCalledWith({
-      where: { id: 'conv-1' },
-      data: expect.objectContaining({ botPaused: true }),
-    });
-    expect(context.conversation.botPaused).toBe(true);
+    const updateArg = mockPrisma.conversation.update.mock.calls[0][0];
+    expect(updateArg.data).not.toHaveProperty('botPaused');
+    expect(context.conversation.botPaused).toBe(false);
   });
 
   it('does not pause the bot when BOT_PAUSE_ON_HANDOFF is false (Req 11.2)', async () => {

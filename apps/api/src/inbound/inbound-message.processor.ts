@@ -747,9 +747,10 @@ export class InboundMessageProcessor {
     if (context.conversation.botPaused) {
       return 'bot_paused';
     }
-    if (context.conversation.handoffCompleted) {
-      return 'handoff_completed';
-    }
+    // Handoff concluído NÃO silencia mais o bot: ele segue respondendo dúvidas
+    // do cliente até um humano ASSUMIR de fato (o /assumir do inbox seta
+    // botPaused). Antes, qualquer mensagem após o encaminhamento recebia só a
+    // confirmação fixa, deixando o cliente preso.
     return null;
   }
 
@@ -1170,7 +1171,7 @@ export class InboundMessageProcessor {
         where: { id: conversationId },
         select: { botPaused: true, handoffCompleted: true },
       });
-      if (!this.config.botAutoReplyEnabled || current?.botPaused || current?.handoffCompleted) {
+      if (!this.config.botAutoReplyEnabled || current?.botPaused) {
         await this.saveCombinedInbound(buffer, combined);
         this.logger.debug(
           `Debounced turn dropped (gated) for conversation ${conversationId}`,
@@ -1436,16 +1437,14 @@ export class InboundMessageProcessor {
       data: {
         handoffAccepted: true,
         handoffCompleted: true,
-        ...(this.config.botPauseOnHandoff ? { botPaused: true } : {}),
+        // NÃO pausamos o bot no handoff: ele segue ajudando o cliente com novas
+        // dúvidas até um humano assumir pelo inbox (/assumir → botPaused).
       },
     });
 
     // Keep the in-memory context consistent so any later read in this request
     // sees the completed handoff (and the re-emit guard holds).
     context.conversation.handoffCompleted = true;
-    if (this.config.botPauseOnHandoff) {
-      context.conversation.botPaused = true;
-    }
 
     // Lifecycle events (Req 11.3).
     await this.recordBotEvent('handoff_requested', {
