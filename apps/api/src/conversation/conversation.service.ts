@@ -260,11 +260,18 @@ export class ConversationService {
     );
     const resolved = resolveIntent(rawContent, { hasFacts, handoffState });
     const intent: IntentCategory = resolved.category;
-    // Um "oi"/cumprimento DEPOIS da abertura não repete a saudação: a IA lê todo
-    // o histórico e conduz com naturalidade (caminho 'general' = LLM). Só o
-    // primeiro cumprimento é tratado como abertura.
-    const routedIntent: IntentCategory =
-      intent === 'greeting' && facts.messageCount > 1 ? 'general' : intent;
+    // Tratamentos de template que cortavam a conversa caem no LLM, que lê o
+    // histórico e CONTINUA conduzindo:
+    //  - "oi"/cumprimento DEPOIS da abertura (não repete a saudação);
+    //  - "ok/beleza/valeu" NO MEIO da conversa (não solta "Tô por aqui" e
+    //    encerra do nada). O "ok" pós-handoff já é handoff_completed_ack, à parte.
+    let routedIntent: IntentCategory = intent;
+    if (
+      (intent === 'greeting' && facts.messageCount > 1) ||
+      intent === 'acknowledgment'
+    ) {
+      routedIntent = 'general';
+    }
 
     // 8. Resolve the handoff transition once (used both for the deterministic
     //    handoff replies and for the final state). Frustration is treated like
