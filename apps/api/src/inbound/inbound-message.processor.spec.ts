@@ -6,6 +6,7 @@ import { ChannelAdapterRegistry } from '../channel/channel-adapter.registry';
 import { AppConfigService } from '../config/config.service';
 import { RateLimiterService } from '../common/rate-limiter';
 import { EvolutionService } from '../modules/channels/evolution/evolution.service';
+import { TranscriptionService } from '../transcription/transcription.service';
 
 /**
  * Focused unit tests for {@link InboundMessageProcessor.applyHandoffSideEffects}
@@ -78,6 +79,7 @@ describe('InboundMessageProcessor - applyHandoffSideEffects', () => {
         { provide: AppConfigService, useValue: mockConfig },
         { provide: RateLimiterService, useValue: new RateLimiterService() },
         { provide: EvolutionService, useValue: mockEvolution },
+        { provide: TranscriptionService, useValue: { isEnabled: false, transcribe: jest.fn() } },
       ],
     }).compile();
 
@@ -371,6 +373,7 @@ describe('InboundMessageProcessor - handleControlCommand', () => {
         { provide: AppConfigService, useValue: mockConfig },
         { provide: RateLimiterService, useValue: new RateLimiterService() },
         { provide: EvolutionService, useValue: mockEvolution },
+        { provide: TranscriptionService, useValue: { isEnabled: false, transcribe: jest.fn() } },
       ],
     }).compile();
 
@@ -565,6 +568,7 @@ describe('InboundMessageProcessor - message debounce', () => {
         { provide: AppConfigService, useValue: mockConfig },
         { provide: RateLimiterService, useValue: new RateLimiterService() },
         { provide: EvolutionService, useValue: mockEvolution },
+        { provide: TranscriptionService, useValue: { isEnabled: false, transcribe: jest.fn() } },
       ],
     }).compile();
 

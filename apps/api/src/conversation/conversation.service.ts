@@ -43,6 +43,14 @@ const REPLY_PREFERENCE_CONTINUE =
 const REPLY_HANDOFF_ACCEPT =
   'Boa, vou te encaminhar pro time da Decodifica seguir daqui com você. Em breve te chamam por aqui.';
 
+// Mensagem de OFERTA do encaminhamento (quando o lead acabou de qualificar):
+// pede a lista completa de problemas antes de passar pro time, pra eles já
+// chegarem com a melhor estratégia.
+const REPLY_HANDOFF_OFFER_LIST =
+  'Acho que já consigo te conectar com o nosso time. Antes de te encaminhar, ' +
+  'me lista aqui, por favor, todos os pontos que você quer resolver — assim a ' +
+  'gente já monta a melhor estratégia pro seu caso.';
+
 const REPLY_HANDOFF_COMPLETED_ACK =
   'Seu atendimento já foi encaminhado para a equipe da Decodifica com o resumo do cenário.';
 
@@ -362,6 +370,26 @@ export class ConversationService {
         }
         break;
       }
+    }
+
+    // #3 — Ao OFERECER o encaminhamento (lead recém-qualificado: none -> suggested),
+    // trocamos a pergunta livre do LLM por um pedido determinístico da lista
+    // completa de problemas, pra o time já receber o cenário e montar a melhor
+    // estratégia. Só no fluxo conversacional ('general'); perguntas diretas e
+    // preço seguem sendo respondidas primeiro (a oferta vem no turno seguinte).
+    if (intent === 'general' && handoffState === 'none' && nextHandoffState === 'suggested') {
+      finalReply = REPLY_HANDOFF_OFFER_LIST;
+      stage = 'conversao';
+    }
+    // Handoff CONFIRMADO neste turno (inclui a auto-escala após a lista — regra
+    // 4b do HandoffManager): usa a confirmação determinística, não a do LLM.
+    if (
+      handoffDecision.reply &&
+      nextHandoffState === 'accepted' &&
+      handoffState !== 'accepted'
+    ) {
+      finalReply = handoffDecision.reply;
+      stage = 'handoff_humano';
     }
 
     // 10. Response guard (R1.4, R2, R5.4, R6, R8): the single post-processor.

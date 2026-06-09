@@ -234,6 +234,31 @@ export class EvolutionService {
     );
   }
 
+  /**
+   * Baixa a mídia de uma mensagem (ex.: áudio do WhatsApp) como base64, usando
+   * o endpoint getBase64FromMediaMessage da Evolution API. Precisa apenas da
+   * `key` da mensagem (id/remoteJid). Retorna `{ base64, mimetype }` ou um erro
+   * key-safe — o chamador trata a falha caindo no aviso de mídia.
+   */
+  async getMediaBase64(key: {
+    id?: string;
+    remoteJid?: string;
+    fromMe?: boolean;
+  }): Promise<EvolutionResult<{ base64: string; mimetype: string }>> {
+    return this.request(
+      {
+        method: 'POST',
+        path: `/chat/getBase64FromMediaMessage/${this.instance}`,
+        body: { message: { key }, convertToMp4: false },
+        retries: 1,
+      },
+      (data) => {
+        const d = (data ?? {}) as { base64?: string; mimetype?: string };
+        return { base64: d.base64 ?? '', mimetype: d.mimetype ?? '' };
+      },
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------------

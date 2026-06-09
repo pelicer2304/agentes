@@ -32,6 +32,13 @@ export const configValidationSchema = Joi.object({
 
   LLM_MODEL_FALLBACK: Joi.string().default('google/gemini-2.5-flash'),
 
+  // --- Audio transcription (Groq Whisper) — opcional ---
+  // Sem GROQ_API_KEY a transcrição fica desligada e o áudio cai no aviso de
+  // "só texto" (nada quebra).
+  GROQ_API_KEY: Joi.string().allow('').optional(),
+  GROQ_BASE_URL: Joi.string().uri().allow('').optional(),
+  GROQ_STT_MODEL: Joi.string().allow('').optional(),
+
   // --- Evolution API configuration ---
   EVOLUTION_API_URL: Joi.string().uri().required().messages({
     'any.required': 'EVOLUTION_API_URL is required. Set it to your Evolution API base URL.',

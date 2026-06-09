@@ -54,9 +54,8 @@ const HANDOFF_ORDER: Record<HandoffState, number> = {
  * internal labels (R10.3, R8).
  */
 const HANDOFF_CONFIRMATION_REPLY =
-  'Boa, vou te encaminhar pro nosso time agora. ' +
-  'Em breve alguém te chama por aqui pra seguir com você. ' +
-  'Quer adiantar mais alguma coisa enquanto isso?';
+  'Perfeito, vou te encaminhar pro nosso time agora com o seu caso. ' +
+  'Em breve alguém te chama por aqui pra seguir com você daqui.';
 
 /**
  * Returns the higher of two handoff states according to the lifecycle order.
@@ -93,6 +92,14 @@ export class HandoffManagerService {
 
     // 4. Accepting a pending offer confirms the handoff.
     if (intent === 'handoff_accept' && current === 'suggested') {
+      return this.toAccepted(current);
+    }
+
+    // 4b. Depois de OFERECER o encaminhamento (estado 'suggested'), a próxima
+    //     resposta conversacional do cliente é a lista de problemas que pedimos
+    //     — confirma o handoff e leva o cenário pro time. (Perguntas diretas e
+    //     preço têm intent próprio e não caem aqui, então seguem respondidas.)
+    if (intent === 'general' && current === 'suggested') {
       return this.toAccepted(current);
     }
 

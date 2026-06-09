@@ -6,6 +6,7 @@ import { EvolutionWebhookController } from '../modules/channels/evolution/evolut
 import { RateLimiterService } from '../common/rate-limiter';
 import { InboundMessageProcessor } from './inbound-message.processor';
 import { PricingConfigService } from './pricing-config.service';
+import { TranscriptionService } from '../transcription/transcription.service';
 
 /**
  * Wires the inbound orchestration layer for the WhatsApp flow.
@@ -42,7 +43,7 @@ import { PricingConfigService } from './pricing-config.service';
 @Module({
   imports: [ConversationModule, ChannelModule, EvolutionModule],
   controllers: [EvolutionWebhookController],
-  providers: [InboundMessageProcessor, PricingConfigService, RateLimiterService],
+  providers: [InboundMessageProcessor, PricingConfigService, RateLimiterService, TranscriptionService],
   exports: [InboundMessageProcessor],
 })
 export class InboundModule {}

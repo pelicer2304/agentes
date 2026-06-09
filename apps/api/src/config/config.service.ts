@@ -83,6 +83,29 @@ export class AppConfigService {
     return this.configService.get<string>('PUBLIC_API_URL')!;
   }
 
+  // --- Audio transcription (Groq Whisper) ---
+
+  /**
+   * Groq API key for speech-to-text. When null, audio transcription is disabled
+   * and audio messages fall back to the "text only" notice — nothing breaks.
+   */
+  get groqApiKey(): string | null {
+    return this.configService.get<string>('GROQ_API_KEY') || null;
+  }
+
+  get groqBaseUrl(): string {
+    return (
+      this.configService.get<string>('GROQ_BASE_URL') ||
+      'https://api.groq.com/openai/v1'
+    );
+  }
+
+  get groqSttModel(): string {
+    return (
+      this.configService.get<string>('GROQ_STT_MODEL') || 'whisper-large-v3'
+    );
+  }
+
   // --- Bot behavior toggles ---
 
   get botAutoReplyEnabled(): boolean {

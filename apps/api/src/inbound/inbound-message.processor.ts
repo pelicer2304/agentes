@@ -17,6 +17,7 @@ import {
   type NormalizationReject,
 } from '../modules/channels/evolution/evolution-normalizer';
 import { EvolutionService } from '../modules/channels/evolution/evolution.service';
+import { TranscriptionService } from '../transcription/transcription.service';
 import { resolveCommand } from '../agent/command-handler';
 import type { CommandResolution } from '../agent/conversation-types';
 
@@ -30,8 +31,14 @@ export const MAX_CONTENT_LENGTH = 4000;
 /**
  * Absolute hard timeout for an engine reply. When the engine exceeds this, the
  * processor abandons waiting and uses the contextual fallback (Requirement 23.2).
+ *
+ * Margem folgada (era 12s): sob rate limit de uma conta OpenRouter sem crédito,
+ * uma resposta pode enfileirar atrás da análise de fundo e passar de 12s,
+ * disparando o fallback "estou com dificuldade" justo no turno que qualifica o
+ * lead. Esperar um pouco mais é melhor que mandar o fallback. A causa raiz se
+ * resolve com crédito no OpenRouter (rate limit maior) + o throttle da análise.
  */
-export const ENGINE_TIMEOUT_MS = 12_000;
+export const ENGINE_TIMEOUT_MS = 22_000;
 
 /** WhatsApp channel literal used throughout the WhatsApp flow. */
 const WHATSAPP_CHANNEL = 'whatsapp';
@@ -219,6 +226,7 @@ export class InboundMessageProcessor {
     private readonly config: AppConfigService,
     private readonly rateLimiter: RateLimiterService,
     private readonly evolution: EvolutionService,
+    private readonly transcription: TranscriptionService,
   ) {}
 
   /**
@@ -243,7 +251,7 @@ export class InboundMessageProcessor {
     });
 
     // 2. Normalize + filter (Req 6.1–6.5). A reject never produces a reply.
-    const normalized = normalizeInbound(payload);
+    let normalized = normalizeInbound(payload);
     if (isNormalizationReject(normalized)) {
       return this.handleReject(webhookLogId, normalized);
     }
@@ -345,6 +353,17 @@ export class InboundMessageProcessor {
         const command = resolveCommand(normalized.content);
         if (command.isCommand) {
           return this.handleControlCommand(webhookLogId, normalized, context, command);
+        }
+      }
+
+      // 4b. Áudio: tenta TRANSCREVER (Groq Whisper) e seguir o fluxo como se
+      //     fosse texto, pra o agente "ouvir" o cliente. Em qualquer falha
+      //     (sem chave, download/transcrição falhou) segue como mídia não
+      //     suportada — o cliente recebe o aviso de texto, nada quebra.
+      if (normalized.messageType === 'audio' && this.transcription.isEnabled) {
+        const transcript = await this.transcribeInboundAudio(normalized);
+        if (transcript) {
+          normalized = { ...normalized, content: transcript, messageType: 'text' };
         }
       }
 
@@ -901,6 +920,45 @@ export class InboundMessageProcessor {
     });
     this.logger.debug(`Inbound control command handled (${eventType})`);
     return { httpStatus: 200, action: 'replied' };
+  }
+
+  /**
+   * Baixa o áudio da Evolution e transcreve via Groq Whisper. Retorna o texto
+   * transcrito, ou `null` quando não há áudio recuperável / a transcrição falha
+   * (o chamador então trata como mídia não suportada). Totalmente tolerante a
+   * erro — nunca lança.
+   */
+  private async transcribeInboundAudio(
+    inbound: InboundMessage,
+  ): Promise<string | null> {
+    try {
+      const payload = inbound.rawPayload as
+        | {
+            data?: {
+              key?: { id?: string; remoteJid?: string; fromMe?: boolean };
+              message?: { audioMessage?: { mimetype?: string } };
+            };
+          }
+        | undefined;
+      const key = payload?.data?.key;
+      if (!key?.id) return null;
+
+      const media = await this.evolution.getMediaBase64(key);
+      if (!media.ok || !media.data.base64) return null;
+
+      const mimetype =
+        media.data.mimetype ||
+        payload?.data?.message?.audioMessage?.mimetype ||
+        'audio/ogg';
+      return await this.transcription.transcribe(media.data.base64, mimetype);
+    } catch (err) {
+      this.logger.warn(
+        `Audio transcription pipeline error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
   }
 
   /**
