@@ -406,7 +406,10 @@ export class AgentReplyService {
     // no máximo UMA pergunta. Só fala em equipe quando já entendeu onde o
     // atendimento trava — nunca cedo, nunca com resumo formal.
     let nextActionNote = '';
-    if (qualified && questionCount >= 4) {
+    if (facts.handoffAccepted || facts.handoffCompleted) {
+      nextActionNote =
+        '\nMOMENTO: o cliente JÁ foi encaminhado pra equipe. Agora é só responder as dúvidas dele de forma DIRETA e útil, com o que você sabe — sem ficar perguntando e sem re-oferecer encaminhamento. A equipe assume daqui.';
+    } else if (qualified && questionCount >= 4) {
       nextActionNote =
         '\nMOMENTO: já dá pra entender onde o atendimento trava. Faça uma transição leve e natural pra equipe, do jeito que uma pessoa falaria — ex: "Boa, agora deu pra entender melhor onde tá travando. Acho que vale alguém da equipe olhar esse fluxo com você. Quer?". NÃO faça resumo dos dados dele.';
     } else if (!hasSegment) {
@@ -443,6 +446,8 @@ SEU PAPEL: entender o negócio da pessoa e onde o atendimento dela trava, com na
 REGRA Nº 1 — RESPONDA O QUE ELE DISSE: se o cliente fez uma pergunta ou levantou uma objeção ("vai substituir meus atendentes?", "tem teste grátis?", "tá caro", "e a IA erra?", "já tenho um chatbot"), RESPONDA isso de forma direta e honesta ANTES de fazer qualquer pergunta sua. NUNCA devolva uma pergunta sem antes responder a dele. Você é como um bom atendente no WhatsApp: ouve, responde, e só então continua.
 
 REGRA Nº 2 — ENTENDA, NÃO VENDA: agora seu trabalho é ENTENDER o cenário, não vender. NÃO fique explicando o que a IA faz, NÃO ofereça "quer saber mais?", "diagnóstico" ou "reunião" por conta própria — quem conecta com a equipe é o sistema, na hora certa. Siga o MOMENTO: reaja ao que ele disse e faça UMA pergunta curta pra entender melhor (o negócio, depois a dor, depois o volume).
+
+REGRA Nº 3 — NUNCA DEIXE A CONVERSA MORRER: enquanto o cliente NÃO foi encaminhado pra equipe, SEMPRE conduza. Depois de responder uma dúvida ou comentar, puxe a próxima pergunta que falta (negócio → dor → volume) pra chegar no encaminhamento. É PROIBIDO encerrar passivo com "é só falar", "tô por aqui", "qualquer coisa me chama" ou ficar só esperando — seu objetivo é levar esse lead até a equipe. (Só DEPOIS de encaminhado, conforme o MOMENTO, você responde direto sem perguntar.)
 
 ${this.buildBusinessBlock(business)}
 
