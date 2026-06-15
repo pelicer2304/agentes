@@ -150,6 +150,52 @@ export const configValidationSchema = Joi.object({
     'any.required': 'FRONTEND_URL is required. Set it to the frontend origin for CORS.',
     'string.empty': 'FRONTEND_URL cannot be empty.',
   }),
+
+  // --- Lead follow-up configuration ---
+  // Offsets temporais (em horas) dos três níveis de follow-up, contados a
+  // partir do Inactivity_Anchor. Fixos por requisito, expostos p/ teste.
+  FOLLOWUP_LEVEL1_HOURS: Joi.number().min(0).default(1).messages({
+    'number.base': 'FOLLOWUP_LEVEL1_HOURS must be a number of hours.',
+  }),
+  FOLLOWUP_LEVEL2_HOURS: Joi.number().min(0).default(24).messages({
+    'number.base': 'FOLLOWUP_LEVEL2_HOURS must be a number of hours.',
+  }),
+  FOLLOWUP_LEVEL3_HOURS: Joi.number().min(0).default(48).messages({
+    'number.base': 'FOLLOWUP_LEVEL3_HOURS must be a number of hours.',
+  }),
+
+  // Janela de resposta após o Nível 3 antes de encerrar o ciclo (em horas).
+  FOLLOWUP_COMPLETION_WINDOW_HOURS: Joi.number().min(0).default(24).messages({
+    'number.base': 'FOLLOWUP_COMPLETION_WINDOW_HOURS must be a number of hours.',
+  }),
+
+  // Janela diária de envio permitida no formato HH:mm-HH:mm
+  // (fuso America/Sao_Paulo). Ex.: '08:00-20:00'.
+  FOLLOWUP_SEND_WINDOW: Joi.string()
+    .pattern(/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/)
+    .default('08:00-20:00')
+    .messages({
+      'string.pattern.base':
+        'FOLLOWUP_SEND_WINDOW must be in the format HH:mm-HH:mm (e.g. "08:00-20:00").',
+    }),
+
+  // Espera mínima ao reagendar por rate-limit (em segundos, mínimo 60).
+  FOLLOWUP_RETRY_BACKOFF_SECONDS: Joi.number().min(60).default(60).messages({
+    'number.base': 'FOLLOWUP_RETRY_BACKOFF_SECONDS must be a number of seconds.',
+    'number.min': 'FOLLOWUP_RETRY_BACKOFF_SECONDS must be at least 60 seconds.',
+  }),
+
+  // Máximo de tentativas adiadas por nível antes de interromper os disparos.
+  FOLLOWUP_MAX_DEFERRALS: Joi.number().integer().min(0).default(10).messages({
+    'number.base': 'FOLLOWUP_MAX_DEFERRALS must be an integer.',
+  }),
+
+  // Cadência do poll do scheduler (em ms). Deve ser <= 60000 para respeitar a
+  // tolerância de 60s do agendamento.
+  FOLLOWUP_POLL_INTERVAL_MS: Joi.number().integer().min(1).max(60000).default(30000).messages({
+    'number.base': 'FOLLOWUP_POLL_INTERVAL_MS must be a number of milliseconds.',
+    'number.max': 'FOLLOWUP_POLL_INTERVAL_MS must be at most 60000 (60s) to respect scheduling tolerance.',
+  }),
 })
   // The frozen engine uses OpenAIProviderService for BOTH "openai" and
   // "openrouter" (it reads OPENAI_API_KEY / OPENAI_BASE_URL). So at least one

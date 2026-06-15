@@ -18,6 +18,7 @@ import {
 } from '../modules/channels/evolution/evolution-normalizer';
 import { EvolutionService } from '../modules/channels/evolution/evolution.service';
 import { TranscriptionService } from '../transcription/transcription.service';
+import { FollowUpService } from '../followup/followup.service';
 import { resolveCommand } from '../agent/command-handler';
 import type { CommandResolution } from '../agent/conversation-types';
 
@@ -228,6 +229,7 @@ export class InboundMessageProcessor {
     private readonly rateLimiter: RateLimiterService,
     private readonly evolution: EvolutionService,
     private readonly transcription: TranscriptionService,
+    private readonly followUpService: FollowUpService,
   ) {}
 
   /**
@@ -496,6 +498,12 @@ export class InboundMessageProcessor {
       if (invocation.status === 'ok') {
         await this.applyHandoffSideEffects(context, invocation.qualification);
       }
+
+      // 14. Follow-up (lead-followup R1.1): o bot enviou uma resposta real ao
+      //     lead; (re)agenda o Nível 1 a partir do lastOutboundAt já persistido
+      //     por persistOutbound. Após o handoff side-effects, então a
+      //     reavaliação de elegibilidade do disparo já enxerga o estado atual.
+      await this.notifyFollowUpOutbound(context.conversation.id);
 
       await this.finalizeWebhookLog(webhookLogId, {
         eventType: 'replied',
@@ -1270,6 +1278,10 @@ export class InboundMessageProcessor {
       if (qualification) {
         await this.applyHandoffSideEffects(flushContext, qualification);
       }
+
+      // Follow-up (lead-followup R1.1): resposta real do bot ao lead pelo caminho
+      // do debounce; (re)agenda o Nível 1 a partir do lastOutboundAt persistido.
+      await this.notifyFollowUpOutbound(conversationId);
     } catch (err) {
       this.logger.error(
         `Debounced flush failed for ${conversationId}: ${this.errMsg(err)}`,
@@ -1790,21 +1802,47 @@ export class InboundMessageProcessor {
           deliveryStatus: 'sent',
         },
       });
-      return;
+    } else {
+      await this.prisma.message.create({
+        data: {
+          conversationId: context.conversation.id,
+          role: 'assistant',
+          direction: 'outbound',
+          content: reply,
+          externalChatId: inbound.from,
+          instanceName: inbound.instance,
+          messageType: 'text',
+          deliveryStatus: 'sent',
+        },
+      });
     }
 
-    await this.prisma.message.create({
-      data: {
-        conversationId: context.conversation.id,
-        role: 'assistant',
-        direction: 'outbound',
-        content: reply,
-        externalChatId: inbound.from,
-        instanceName: inbound.instance,
-        messageType: 'text',
-        deliveryStatus: 'sent',
-      },
-    });
+    // Avança o `lastOutboundAt` da Conversation com o instante do envio
+    // confirmado. O follow-up (lead-followup R1.1) calcula o Inactivity_Anchor a
+    // partir deste campo, então ele PRECISA estar persistido ANTES de
+    // `ensureScheduled` ser chamado pelo hook de outbound — caso contrário o
+    // anchor não é calculado e nenhum Nível 1 é agendado. A atualização é
+    // tolerante a falha: o envio já ocorreu e não pode ser revertido.
+    await this.touchLastOutboundAt(context.conversation.id);
+  }
+
+  /**
+   * Persiste `conversation.lastOutboundAt = agora` de forma resiliente. Uma
+   * falha aqui é apenas logada e nunca propaga: a mensagem outbound já foi
+   * entregue e a resposta HTTP do webhook não deve virar 500 por causa desta
+   * atualização auxiliar.
+   */
+  private async touchLastOutboundAt(conversationId: string): Promise<void> {
+    try {
+      await this.prisma.conversation.update({
+        where: { id: conversationId },
+        data: { lastOutboundAt: new Date() },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Falha ao atualizar lastOutboundAt da conversa ${conversationId}: ${this.errMsg(err)}`,
+      );
+    }
   }
 
   /**
@@ -1907,6 +1945,14 @@ export class InboundMessageProcessor {
 
   /**
    * Record a Bot_Event lifecycle row (Req 22.3–22.5, 19.4/19.5).
+   *
+   * Ponto de integração do follow-up (lead-followup R3.1): o evento
+   * `message_inbound_saved` é o sinal canônico de que uma mensagem inbound
+   * REAL do lead acabou de ser persistida (caminho direto, debounce, mídia não
+   * suportada e gating). Ele NUNCA é emitido para mensagens outbound do bot nem
+   * para eventos de sistema, então este é o local correto e único para acionar
+   * o cancelamento/reinício do ciclo de follow-up. A chamada é resiliente: uma
+   * falha do follow-up jamais interrompe o processamento do inbound.
    */
   private async recordBotEvent(
     type: BotEventType,
@@ -1924,6 +1970,56 @@ export class InboundMessageProcessor {
         payload: this.toJson(args.payload),
       },
     });
+
+    if (type === 'message_inbound_saved' && args.conversationId !== null) {
+      await this.notifyFollowUpInbound(args.conversationId);
+    }
+  }
+
+  /**
+   * Aciona o hook de inbound do follow-up (R3.1) de forma resiliente. O
+   * `FollowUpService.onInboundReceived` cancela os níveis pendentes e, se a
+   * conversa permanece elegível, reinicia o ciclo no Nível 1. Qualquer falha é
+   * apenas logada — nunca propaga — para que o processamento do inbound (que já
+   * é assíncrono fora da resposta ao webhook) não seja interrompido.
+   */
+  private async notifyFollowUpInbound(conversationId: string): Promise<void> {
+    try {
+      await this.followUpService.onInboundReceived(conversationId, new Date());
+    } catch (err) {
+      this.logger.warn(
+        `Follow-up onInboundReceived falhou para a conversa ${conversationId}: ${this.errMsg(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Aciona o hook de outbound do follow-up (lead-followup R1.1) de forma
+   * resiliente. Quando o bot acaba de enviar uma resposta conversacional REAL ao
+   * lead (resposta do engine ou o fallback contextual), `ensureScheduled`
+   * (re)agenda o Nível 1 a partir do `lastOutboundAt` recém-persistido.
+   *
+   * Este helper é chamado APENAS nos pontos de resposta conversacional do bot ao
+   * lead — o caminho síncrono ({@link process}) e o flush do debounce
+   * ({@link flushDebouncedTurn}) — e NUNCA nas mensagens internas/de controle
+   * (confirmação de handoff concluído, comandos `/clear|/reset|/help`, aviso de
+   * mídia não suportada) nem no resumo interno enviado ao admin. Assim o ciclo
+   * de follow-up só nasce de um outbound real do bot aguardando resposta.
+   *
+   * `ensureScheduled` já é seguro/idempotente: não agenda quando não há outbound
+   * aguardando resposta (anchor nulo) e a reavaliação de elegibilidade no
+   * instante do disparo (`processDue`) é a rede de segurança caso a conversa
+   * deixe de ser elegível depois (ex.: handoff aceito neste mesmo turno).
+   * Qualquer falha é apenas logada — nunca interrompe o fluxo de envio.
+   */
+  private async notifyFollowUpOutbound(conversationId: string): Promise<void> {
+    try {
+      await this.followUpService.ensureScheduled(conversationId);
+    } catch (err) {
+      this.logger.warn(
+        `Follow-up ensureScheduled falhou para a conversa ${conversationId}: ${this.errMsg(err)}`,
+      );
+    }
   }
 
   // -------------------------------------------------------------------------

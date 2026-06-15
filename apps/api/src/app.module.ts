@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AppConfigModule } from './config/config.module';
@@ -16,10 +17,12 @@ import { AuthModule } from './auth/auth.module';
 import { HealthModule } from './health/health.module';
 import { InboundModule } from './inbound/inbound.module';
 import { InboxModule } from './inbox/inbox.module';
+import { FollowUpModule } from './followup/followup.module';
 
 @Module({
   imports: [
     AppConfigModule,
+    ScheduleModule.forRoot(),
     PrismaModule,
     ChannelModule,
     LLMModule,
@@ -34,6 +37,7 @@ import { InboxModule } from './inbox/inbox.module';
     HealthModule,
     InboundModule,
     InboxModule,
+    FollowUpModule,
   ],
   controllers: [AppController],
   providers: [AppService],

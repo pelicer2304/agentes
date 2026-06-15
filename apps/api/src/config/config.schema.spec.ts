@@ -214,4 +214,107 @@ describe('configValidationSchema', () => {
     const { error } = configValidationSchema.validate(env, { allowUnknown: true });
     expect(error).toBeUndefined();
   });
+
+  describe('follow-up defaults (Requirement 9.2)', () => {
+    it('should default FOLLOWUP_LEVEL1_HOURS to 1 when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_LEVEL1_HOURS).toBe(1);
+    });
+
+    it('should default FOLLOWUP_LEVEL2_HOURS to 24 when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_LEVEL2_HOURS).toBe(24);
+    });
+
+    it('should default FOLLOWUP_LEVEL3_HOURS to 48 when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_LEVEL3_HOURS).toBe(48);
+    });
+
+    it('should default FOLLOWUP_COMPLETION_WINDOW_HOURS to 24 when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_COMPLETION_WINDOW_HOURS).toBe(24);
+    });
+
+    it('should default FOLLOWUP_SEND_WINDOW to "08:00-20:00" when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_SEND_WINDOW).toBe('08:00-20:00');
+    });
+
+    it('should default FOLLOWUP_RETRY_BACKOFF_SECONDS to 60 when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_RETRY_BACKOFF_SECONDS).toBe(60);
+    });
+
+    it('should default FOLLOWUP_MAX_DEFERRALS to 10 when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_MAX_DEFERRALS).toBe(10);
+    });
+
+    it('should default FOLLOWUP_POLL_INTERVAL_MS to 30000 when absent', () => {
+      const { error, value } = configValidationSchema.validate(validEnv);
+      expect(error).toBeUndefined();
+      expect(value.FOLLOWUP_POLL_INTERVAL_MS).toBe(30000);
+    });
+  });
+
+  describe('FOLLOWUP_SEND_WINDOW format validation (Requirement 9.3)', () => {
+    it.each(['08:00-20:00', '00:00-23:59', '09:30-18:45'])(
+      'should accept the valid window "%s"',
+      (window) => {
+        const env = { ...validEnv, FOLLOWUP_SEND_WINDOW: window };
+        expect(configValidationSchema.validate(env).error).toBeUndefined();
+      },
+    );
+
+    it.each([
+      '8:00-20:00', // hour not zero-padded
+      '08:00 - 20:00', // spaces around dash
+      '08:00', // missing end
+      '08:00-24:00', // hour out of range
+      '08:60-20:00', // minute out of range
+      '0800-2000', // missing colons
+      'morning', // not a time at all
+    ])('should reject the invalid window "%s" and name it', (window) => {
+      const env = { ...validEnv, FOLLOWUP_SEND_WINDOW: window };
+      const { error } = configValidationSchema.validate(env);
+      expect(error).toBeDefined();
+      expect(error!.message).toContain('FOLLOWUP_SEND_WINDOW');
+    });
+  });
+
+  describe('FOLLOWUP_RETRY_BACKOFF_SECONDS minimum validation (Requirement 9.5)', () => {
+    it('should accept the lower bound 60', () => {
+      const env = { ...validEnv, FOLLOWUP_RETRY_BACKOFF_SECONDS: 60 };
+      expect(configValidationSchema.validate(env).error).toBeUndefined();
+    });
+
+    it('should reject a value below 60 and name it', () => {
+      const env = { ...validEnv, FOLLOWUP_RETRY_BACKOFF_SECONDS: 59 };
+      const { error } = configValidationSchema.validate(env);
+      expect(error).toBeDefined();
+      expect(error!.message).toContain('FOLLOWUP_RETRY_BACKOFF_SECONDS');
+    });
+  });
+
+  describe('FOLLOWUP_POLL_INTERVAL_MS maximum validation (Requirement 9.5)', () => {
+    it('should accept the upper bound 60000', () => {
+      const env = { ...validEnv, FOLLOWUP_POLL_INTERVAL_MS: 60000 };
+      expect(configValidationSchema.validate(env).error).toBeUndefined();
+    });
+
+    it('should reject a value above 60000 and name it', () => {
+      const env = { ...validEnv, FOLLOWUP_POLL_INTERVAL_MS: 60001 };
+      const { error } = configValidationSchema.validate(env);
+      expect(error).toBeDefined();
+      expect(error!.message).toContain('FOLLOWUP_POLL_INTERVAL_MS');
+    });
+  });
 });

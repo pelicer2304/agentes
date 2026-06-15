@@ -195,4 +195,69 @@ export class AppConfigService {
   get isDevelopment(): boolean {
     return this.appEnv === 'development';
   }
+
+  // --- Lead follow-up configuration ---
+
+  /** Offset (em horas) do Nível 1 do follow-up a partir do Inactivity_Anchor. */
+  get followUpLevel1Hours(): number {
+    const value = this.configService.get<number>('FOLLOWUP_LEVEL1_HOURS');
+    return typeof value === 'number' ? value : 1;
+  }
+
+  /** Offset (em horas) do Nível 2 do follow-up a partir do Inactivity_Anchor. */
+  get followUpLevel2Hours(): number {
+    const value = this.configService.get<number>('FOLLOWUP_LEVEL2_HOURS');
+    return typeof value === 'number' ? value : 24;
+  }
+
+  /** Offset (em horas) do Nível 3 do follow-up a partir do Inactivity_Anchor. */
+  get followUpLevel3Hours(): number {
+    const value = this.configService.get<number>('FOLLOWUP_LEVEL3_HOURS');
+    return typeof value === 'number' ? value : 48;
+  }
+
+  /** Janela de resposta (em horas) após o Nível 3 antes de encerrar o ciclo. */
+  get followUpCompletionWindowHours(): number {
+    const value = this.configService.get<number>('FOLLOWUP_COMPLETION_WINDOW_HOURS');
+    return typeof value === 'number' ? value : 24;
+  }
+
+  /** Janela diária de envio permitida no formato bruto `HH:mm-HH:mm`. */
+  get followUpSendWindow(): string {
+    return this.configService.get<string>('FOLLOWUP_SEND_WINDOW') || '08:00-20:00';
+  }
+
+  /**
+   * Janela diária de envio permitida já analisada em horas/minutos de início
+   * e fim, para consumo direto pelos serviços de follow-up.
+   */
+  get followUpSendWindowParsed(): {
+    startHour: number;
+    startMinute: number;
+    endHour: number;
+    endMinute: number;
+  } {
+    const [start, end] = this.followUpSendWindow.split('-');
+    const [startHour, startMinute] = start.split(':').map((part) => Number(part));
+    const [endHour, endMinute] = end.split(':').map((part) => Number(part));
+    return { startHour, startMinute, endHour, endMinute };
+  }
+
+  /** Espera mínima (em segundos) ao reagendar por rate-limit (mínimo 60). */
+  get followUpRetryBackoffSeconds(): number {
+    const value = this.configService.get<number>('FOLLOWUP_RETRY_BACKOFF_SECONDS');
+    return typeof value === 'number' ? value : 60;
+  }
+
+  /** Máximo de tentativas adiadas por nível antes de interromper os disparos. */
+  get followUpMaxDeferrals(): number {
+    const value = this.configService.get<number>('FOLLOWUP_MAX_DEFERRALS');
+    return typeof value === 'number' ? value : 10;
+  }
+
+  /** Cadência do poll do scheduler de follow-up (em ms). */
+  get followUpPollIntervalMs(): number {
+    const value = this.configService.get<number>('FOLLOWUP_POLL_INTERVAL_MS');
+    return typeof value === 'number' ? value : 30000;
+  }
 }

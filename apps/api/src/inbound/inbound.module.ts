@@ -3,6 +3,7 @@ import { ChannelModule } from '../channel/channel.module';
 import { ConversationModule } from '../conversation/conversation.module';
 import { EvolutionModule } from '../modules/channels/evolution/evolution.module';
 import { EvolutionWebhookController } from '../modules/channels/evolution/evolution-webhook.controller';
+import { FollowUpModule } from '../followup/followup.module';
 import { RateLimiterService } from '../common/rate-limiter';
 import { InboundMessageProcessor } from './inbound-message.processor';
 import { PricingConfigService } from './pricing-config.service';
@@ -29,6 +30,12 @@ import { TranscriptionService } from '../transcription/transcription.service';
  *  - `PrismaService` is available globally via the `@Global()` `PrismaModule`,
  *    and `AppConfigService` via the `@Global()` `AppConfigModule`; neither is
  *    re-imported here.
+ *  - {@link FollowUpModule} — exporta o `FollowUpService`, usado pelo
+ *    {@link InboundMessageProcessor} para cancelar/reiniciar o ciclo de
+ *    follow-up quando uma mensagem inbound REAL do lead é persistida (R3.1).
+ *    A direção de dependência permanece unilateral: `FollowUpModule` importa
+ *    apenas `ChannelModule` (não importa `InboundModule`), então não há ciclo
+ *    de DI.
  *
  * The {@link InboundMessageProcessor} is exported so the
  * `EvolutionWebhookController` (task 6.4) can delegate to it.
@@ -41,7 +48,7 @@ import { TranscriptionService } from '../transcription/transcription.service';
  * direction one-way and avoids an `EvolutionModule -> InboundModule` DI cycle.
  */
 @Module({
-  imports: [ConversationModule, ChannelModule, EvolutionModule],
+  imports: [ConversationModule, ChannelModule, EvolutionModule, FollowUpModule],
   controllers: [EvolutionWebhookController],
   providers: [InboundMessageProcessor, PricingConfigService, RateLimiterService, TranscriptionService],
   exports: [InboundMessageProcessor],

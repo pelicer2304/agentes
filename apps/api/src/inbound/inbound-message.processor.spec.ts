@@ -7,6 +7,7 @@ import { AppConfigService } from '../config/config.service';
 import { RateLimiterService } from '../common/rate-limiter';
 import { EvolutionService } from '../modules/channels/evolution/evolution.service';
 import { TranscriptionService } from '../transcription/transcription.service';
+import { FollowUpService } from '../followup/followup.service';
 
 /**
  * Focused unit tests for {@link InboundMessageProcessor.applyHandoffSideEffects}
@@ -80,6 +81,14 @@ describe('InboundMessageProcessor - applyHandoffSideEffects', () => {
         { provide: RateLimiterService, useValue: new RateLimiterService() },
         { provide: EvolutionService, useValue: mockEvolution },
         { provide: TranscriptionService, useValue: { isEnabled: false, transcribe: jest.fn() } },
+        {
+          provide: FollowUpService,
+          useValue: {
+            ensureScheduled: jest.fn().mockResolvedValue(undefined),
+            onInboundReceived: jest.fn().mockResolvedValue(undefined),
+            onLeadLost: jest.fn().mockResolvedValue(undefined),
+          },
+        },
       ],
     }).compile();
 
@@ -374,6 +383,14 @@ describe('InboundMessageProcessor - handleControlCommand', () => {
         { provide: RateLimiterService, useValue: new RateLimiterService() },
         { provide: EvolutionService, useValue: mockEvolution },
         { provide: TranscriptionService, useValue: { isEnabled: false, transcribe: jest.fn() } },
+        {
+          provide: FollowUpService,
+          useValue: {
+            ensureScheduled: jest.fn().mockResolvedValue(undefined),
+            onInboundReceived: jest.fn().mockResolvedValue(undefined),
+            onLeadLost: jest.fn().mockResolvedValue(undefined),
+          },
+        },
       ],
     }).compile();
 
@@ -476,6 +493,11 @@ describe('InboundMessageProcessor - handleControlCommand', () => {
  */
 describe('InboundMessageProcessor - message debounce', () => {
   let processor: InboundMessageProcessor;
+  let followUpService: {
+    ensureScheduled: jest.Mock;
+    onInboundReceived: jest.Mock;
+    onLeadLost: jest.Mock;
+  };
 
   const sendMessage = jest.fn();
   const mockPrisma = {
@@ -569,10 +591,19 @@ describe('InboundMessageProcessor - message debounce', () => {
         { provide: RateLimiterService, useValue: new RateLimiterService() },
         { provide: EvolutionService, useValue: mockEvolution },
         { provide: TranscriptionService, useValue: { isEnabled: false, transcribe: jest.fn() } },
+        {
+          provide: FollowUpService,
+          useValue: {
+            ensureScheduled: jest.fn().mockResolvedValue(undefined),
+            onInboundReceived: jest.fn().mockResolvedValue(undefined),
+            onLeadLost: jest.fn().mockResolvedValue(undefined),
+          },
+        },
       ],
     }).compile();
 
     processor = module.get(InboundMessageProcessor);
+    followUpService = module.get(FollowUpService) as unknown as typeof followUpService;
   });
 
   afterEach(() => {
@@ -601,6 +632,48 @@ describe('InboundMessageProcessor - message debounce', () => {
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ to: '5511999999999', conversationId: 'conv-1' }),
     );
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Task 12.4 — follow-up hook wiring on a REAL bot turn (lead-followup
+  // R3.1, R1.1). Flushing a debounced turn persists a real inbound from the
+  // lead (emits `message_inbound_saved`) AND a real outbound from the bot
+  // (after `persistOutbound`). Both observable hooks must fire with the
+  // conversationId: `onInboundReceived` (cancel/restart) and `ensureScheduled`
+  // (schedule level 1 from the last outbound).
+  // ─────────────────────────────────────────────────────────────────────────
+  it('fires onInboundReceived and ensureScheduled with the conversationId on a real flushed turn (R3.1, R1.1)', async () => {
+    await enqueue(inbound('quero saber dos valores', 'EXT1'), 'quero saber dos valores');
+
+    // Nothing fired yet — still buffering inside the quiet window.
+    expect(followUpService.onInboundReceived).not.toHaveBeenCalled();
+    expect(followUpService.ensureScheduled).not.toHaveBeenCalled();
+
+    await flush('conv-1');
+
+    // Inbound hook: the real inbound from the lead was saved → cancel/restart.
+    expect(followUpService.onInboundReceived).toHaveBeenCalledWith(
+      'conv-1',
+      expect.any(Date),
+    );
+    // Outbound hook: the bot answered → (re)schedule the follow-up cycle.
+    expect(followUpService.ensureScheduled).toHaveBeenCalledWith('conv-1');
+  });
+
+  it('does NOT call ensureScheduled when the turn is gated (no real bot outbound)', async () => {
+    // The conversation became paused mid-window → the combined inbound is still
+    // persisted, but the bot sends NO reply, so the outbound hook
+    // (ensureScheduled) must not fire.
+    mockPrisma.conversation.findUnique.mockResolvedValueOnce({
+      botPaused: true,
+      handoffCompleted: false,
+    });
+
+    await enqueue(inbound('oi', 'EXT1'), 'oi');
+    await flush('conv-1');
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(followUpService.ensureScheduled).not.toHaveBeenCalled();
   });
 
   it('sends a "digitando" presence when a message is buffered', async () => {
@@ -637,5 +710,116 @@ describe('InboundMessageProcessor - message debounce', () => {
     expect(sendMessage).not.toHaveBeenCalled();
     // The combined inbound is still persisted so history is not lost.
     expect(mockPrisma.message.create).toHaveBeenCalled();
+  });
+});
+
+/**
+ * Task 12.4 — follow-up INBOUND hook wiring (lead-followup R3.1).
+ *
+ * `message_inbound_saved` is the single canonical signal that a REAL inbound
+ * message from the lead was just persisted (direct, debounce, unsupported
+ * media and gating paths all emit it). It is the ONLY Bot_Event that triggers
+ * `FollowUpService.onInboundReceived` (cancel pending levels / restart cycle).
+ * System events and bot outbound events MUST NOT trigger it. These tests pin
+ * that wiring by driving the private `recordBotEvent` directly, so the
+ * verification stays scoped to the hook dispatch decision.
+ */
+describe('InboundMessageProcessor - follow-up inbound hook wiring', () => {
+  let processor: InboundMessageProcessor;
+  let followUpService: {
+    ensureScheduled: jest.Mock;
+    onInboundReceived: jest.Mock;
+    onLeadLost: jest.Mock;
+  };
+
+  const mockPrisma = {
+    botEvent: { create: jest.fn().mockResolvedValue({}) },
+  };
+
+  const recordBotEvent = (
+    type: string,
+    args: { conversationId: string | null; leadId: string | null; payload: Record<string, unknown> },
+  ): Promise<void> =>
+    (processor as unknown as {
+      recordBotEvent: (t: string, a: unknown) => Promise<void>;
+    }).recordBotEvent(type, args);
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InboundMessageProcessor,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: ConversationService, useValue: { handleInboundMessage: jest.fn() } },
+        { provide: ChannelAdapterRegistry, useValue: { get: jest.fn() } },
+        { provide: AppConfigService, useValue: { botPauseOnHandoff: false, adminWhatsappNumbers: [] } },
+        { provide: RateLimiterService, useValue: new RateLimiterService() },
+        { provide: EvolutionService, useValue: { sendTextMessage: jest.fn() } },
+        { provide: TranscriptionService, useValue: { isEnabled: false, transcribe: jest.fn() } },
+        {
+          provide: FollowUpService,
+          useValue: {
+            ensureScheduled: jest.fn().mockResolvedValue(undefined),
+            onInboundReceived: jest.fn().mockResolvedValue(undefined),
+            onLeadLost: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+      ],
+    }).compile();
+
+    processor = module.get(InboundMessageProcessor);
+    followUpService = module.get(FollowUpService) as unknown as typeof followUpService;
+  });
+
+  afterEach(() => jest.clearAllMocks());
+
+  it('calls onInboundReceived with the conversationId when a real inbound is saved (R3.1)', async () => {
+    await recordBotEvent('message_inbound_saved', {
+      conversationId: 'conv-42',
+      leadId: 'lead-42',
+      payload: { externalMessageId: 'EXT1' },
+    });
+
+    expect(followUpService.onInboundReceived).toHaveBeenCalledTimes(1);
+    expect(followUpService.onInboundReceived).toHaveBeenCalledWith(
+      'conv-42',
+      expect.any(Date),
+    );
+    // The inbound hook never schedules — that is the outbound hook's job.
+    expect(followUpService.ensureScheduled).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call onInboundReceived for non-inbound Bot_Events (bot outbound / system)', async () => {
+    await recordBotEvent('message_outbound_sent', {
+      conversationId: 'conv-42',
+      leadId: 'lead-42',
+      payload: { phone: '5511999999999' },
+    });
+    await recordBotEvent('webhook_received', {
+      conversationId: null,
+      leadId: null,
+      payload: { received: true },
+    });
+    await recordBotEvent('evolution_error', {
+      conversationId: 'conv-42',
+      leadId: 'lead-42',
+      payload: { stage: 'send_reply' },
+    });
+    await recordBotEvent('handoff_completed', {
+      conversationId: 'conv-42',
+      leadId: 'lead-42',
+      payload: {},
+    });
+
+    expect(followUpService.onInboundReceived).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call onInboundReceived when message_inbound_saved lacks a conversationId', async () => {
+    await recordBotEvent('message_inbound_saved', {
+      conversationId: null,
+      leadId: null,
+      payload: {},
+    });
+
+    expect(followUpService.onInboundReceived).not.toHaveBeenCalled();
   });
 });

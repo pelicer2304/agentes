@@ -8,6 +8,7 @@ import { ContextTrackerService } from '../agent/context-tracker';
 import { HandoffManagerService } from '../agent/handoff-manager';
 import { ResponseGuardService, GuardInput } from '../agent/response-guard.service';
 import { PricingConfigService } from '../inbound/pricing-config.service';
+import { FollowUpService } from '../followup/followup.service';
 import { resolveCommand, availableCommandsReply } from '../agent/command-handler';
 import { classifyEdgeInput, edgeReply } from '../agent/edge-input';
 import { resolveIntent } from '../agent/intent-resolver';
@@ -85,6 +86,7 @@ export class ConversationService {
     private readonly responseGuard: ResponseGuardService,
     private readonly pricingConfig: PricingConfigService,
     private readonly knowledge: KnowledgeService,
+    private readonly followUpService: FollowUpService,
   ) {}
 
   /**
@@ -506,6 +508,22 @@ export class ConversationService {
       });
     } catch (err) {
       this.logger.error(`[${conversationId}] Failed to update lead: ${err instanceof Error ? err.message : 'Unknown'}`);
+    }
+
+    // 13b. Follow-up hook (R4.2): quando o lead acabou de transitar para
+    //      `perdido` (intent `desistance`), cancela o ciclo de follow-up. Só
+    //      dispara na transição efetiva (status anterior != `perdido`), nunca a
+    //      cada turno. Resiliente: uma falha do follow-up jamais quebra o fluxo
+    //      da conversa (fire-and-forget com `.catch`).
+    const previouslyLost = conversation.lead?.status === 'perdido';
+    if (finalStatus === 'perdido' && !previouslyLost) {
+      void this.followUpService
+        .onLeadLost(conversationId, new Date())
+        .catch((err) =>
+          this.logger.error(
+            `[${conversationId}] Follow-up onLeadLost hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
+          ),
+        );
     }
 
     // 14. If handoff → update conversation state.

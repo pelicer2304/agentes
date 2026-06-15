@@ -64,11 +64,12 @@ model Conversation {
   lastInboundAt    DateTime? @map("last_inbound_at")
   lastOutboundAt   DateTime? @map("last_outbound_at")
 
-  lead          Lead            @relation(fields: [leadId], references: [id])
-  messages      Message[]
-  agentAnalyses AgentAnalysis[]
-  assignee      User?           @relation(fields: [assignedTo], references: [id])
-  botEvents     BotEvent[]
+  lead             Lead              @relation(fields: [leadId], references: [id])
+  messages         Message[]
+  agentAnalyses    AgentAnalysis[]
+  assignee         User?             @relation(fields: [assignedTo], references: [id])
+  botEvents        BotEvent[]
+  followUpSchedule FollowUpSchedule?
 
   @@index([channel, instanceName, status])
   @@map("conversations")
@@ -200,4 +201,50 @@ model PricingConfig {
   updatedAt           DateTime @updatedAt @map("updated_at")
 
   @@map("pricing_config")
+}
+
+model FollowUpSchedule {
+  id             String @id @default(uuid()) @db.Uuid
+  conversationId String @unique @map("conversation_id") @db.Uuid
+  leadId         String @map("lead_id") @db.Uuid
+
+  // Estado do ciclo: 'active' (em andamento), 'cancelled' (cancelado por
+  // handoff/perdido/resposta), 'completed' (esgotou os 3 niveis).
+  cycleState String @default("active") @map("cycle_state") @db.VarChar(20)
+
+  // Instante a partir do qual a inatividade e medida (Inactivity_Anchor).
+  inactivityAnchor DateTime @map("inactivity_anchor")
+
+  // Maior nivel ja enviado (0 = nenhum). A marcacao atomica de "enviado"
+  // incrementa este campo condicionalmente (WHERE max_sent_level < :level),
+  // garantindo idempotencia e monotonicidade (R7.1, R7.2).
+  maxSentLevel Int @default(0) @map("max_sent_level") @db.SmallInt
+
+  // Proximo nivel a disparar (1..3) e seu instante agendado. Null quando nao
+  // ha nivel pendente (ciclo cancelado/encerrado).
+  pendingLevel Int?      @map("pending_level") @db.SmallInt
+  nextRunAt    DateTime? @map("next_run_at")
+
+  // Instante em que o Nivel 3 foi disparado, base p/ a janela de 24h de
+  // encerramento (R6.1).
+  level3FiredAt DateTime? @map("level3_fired_at")
+
+  // Controle de concorrencia (lease lock). Uma linha esta "reivindicada"
+  // enquanto lockedUntil > now; o lease expira em 60s (R7.6).
+  lockedUntil DateTime? @map("locked_until")
+
+  // Tentativas adiadas do disparo corrente (janela/rate-limit/erro), p/ o
+  // limite maximo de reenvios (R9.5).
+  deferredAttempts Int @default(0) @map("deferred_attempts") @db.SmallInt
+
+  lastError String? @map("last_error") @db.VarChar(2000)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+
+  @@index([cycleState, nextRunAt])
+  @@index([cycleState, level3FiredAt])
+  @@map("follow_up_schedules")
 }

@@ -11,6 +11,7 @@ import { HandoffManagerService } from '../agent/handoff-manager';
 import { ResponseGuardService } from '../agent/response-guard.service';
 import { PricingConfigService } from '../inbound/pricing-config.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
+import { FollowUpService } from '../followup/followup.service';
 import { classifyEdgeInput, edgeReply } from '../agent/edge-input';
 
 /**
@@ -30,6 +31,11 @@ describe('ConversationService', () => {
   let service: ConversationService;
   let prisma: jest.Mocked<any>;
   let agentReply: jest.Mocked<any>;
+  let followUp: {
+    ensureScheduled: jest.Mock;
+    onInboundReceived: jest.Mock;
+    onLeadLost: jest.Mock;
+  };
   let idCounter = 0;
 
   // A conversation row (with its lead) as returned by prisma.conversation.findUnique.
@@ -115,6 +121,12 @@ describe('ConversationService', () => {
       findAll: jest.fn().mockResolvedValue({}),
     };
 
+    const mockFollowUpService = {
+      ensureScheduled: jest.fn().mockResolvedValue(undefined),
+      onInboundReceived: jest.fn().mockResolvedValue(undefined),
+      onLeadLost: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConversationService,
@@ -128,12 +140,14 @@ describe('ConversationService', () => {
         ResponseGuardService,
         { provide: PricingConfigService, useValue: mockPricingConfig },
         { provide: KnowledgeService, useValue: mockKnowledge },
+        { provide: FollowUpService, useValue: mockFollowUpService },
       ],
     }).compile();
 
     service = module.get<ConversationService>(ConversationService);
     prisma = module.get(PrismaService);
     agentReply = module.get(AgentReplyService);
+    followUp = module.get(FollowUpService) as unknown as typeof followUp;
   });
 
   describe('createConversation', () => {
@@ -588,6 +602,61 @@ describe('ConversationService', () => {
           data: expect.objectContaining({ segment: 'clínica' }),
         }),
       );
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Task 12.4 — follow-up onLeadLost hook wiring (lead-followup R4.2).
+  // When the turn drives the lead to status 'perdido' (intent desistance),
+  // ConversationService must fire FollowUpService.onLeadLost(conversationId,
+  // now) exactly once — on the transition only — to cancel the follow-up
+  // cycle. A normal turn (no transition to 'perdido') must never call it.
+  // ───────────────────────────────────────────────────────────────────────────
+  describe('follow-up onLeadLost hook wiring', () => {
+    it('calls onLeadLost with the conversationId when the lead transitions to perdido (desistance)', async () => {
+      prisma.conversation.findUnique.mockResolvedValue(baseConversation());
+      prisma.message.findMany.mockResolvedValue([
+        { role: 'assistant', content: 'Como posso ajudar?', createdAt: new Date() },
+      ]);
+
+      const result = await service.handleInboundMessage(
+        'conv-1',
+        'vou procurar outro fornecedor',
+      );
+
+      // The turn marks the lead lost...
+      expect(result.qualification.status).toBe('perdido');
+      // ...and the follow-up cycle is cancelled via the hook.
+      expect(followUp.onLeadLost).toHaveBeenCalledTimes(1);
+      expect(followUp.onLeadLost).toHaveBeenCalledWith('conv-1', expect.any(Date));
+    });
+
+    it('does NOT call onLeadLost when the lead was already perdido (no transition)', async () => {
+      prisma.conversation.findUnique.mockResolvedValue(
+        baseConversation({
+          lead: { id: 'lead-1', name: 'Playground Lead', status: 'perdido' },
+        }),
+      );
+      prisma.message.findMany.mockResolvedValue([
+        { role: 'assistant', content: 'Como posso ajudar?', createdAt: new Date() },
+      ]);
+
+      await service.handleInboundMessage('conv-1', 'vou procurar outro fornecedor');
+
+      // Already lost → the transition guard suppresses a duplicate cancel.
+      expect(followUp.onLeadLost).not.toHaveBeenCalled();
+    });
+
+    it('does NOT call onLeadLost on a normal qualifying turn', async () => {
+      prisma.conversation.findUnique.mockResolvedValue(baseConversation());
+      prisma.message.findMany.mockResolvedValue([
+        { role: 'user', content: 'tenho um restaurante', createdAt: new Date() },
+      ]);
+
+      const result = await service.handleInboundMessage('conv-1', 'tenho um restaurante');
+
+      expect(result.qualification.status).not.toBe('perdido');
+      expect(followUp.onLeadLost).not.toHaveBeenCalled();
     });
   });
 
