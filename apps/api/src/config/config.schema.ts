@@ -196,6 +196,39 @@ export const configValidationSchema = Joi.object({
     'number.base': 'FOLLOWUP_POLL_INTERVAL_MS must be a number of milliseconds.',
     'number.max': 'FOLLOWUP_POLL_INTERVAL_MS must be at most 60000 (60s) to respect scheduling tolerance.',
   }),
+
+  // --- Lead follow-up evolution: deferral + engagement classification ---
+  // Deferral_Offset padrão do follow-up adiado, em horas (R11.2).
+  FOLLOWUP_DEFAULT_DEFERRAL_HOURS: Joi.number().min(1).default(5).messages({
+    'number.base': 'FOLLOWUP_DEFAULT_DEFERRAL_HOURS must be a number of hours.',
+    'number.min': 'FOLLOWUP_DEFAULT_DEFERRAL_HOURS must be at least 1 hour.',
+  }),
+
+  // Piso do Inferred_Deferral, em horas (R11.3). Sem teto.
+  FOLLOWUP_MIN_DEFERRAL_HOURS: Joi.number().min(1).default(1).messages({
+    'number.base': 'FOLLOWUP_MIN_DEFERRAL_HOURS must be a number of hours.',
+    'number.min': 'FOLLOWUP_MIN_DEFERRAL_HOURS must be at least 1 hour.',
+  }),
+
+  // Timeout (ms) da classificação de engajamento no turno (R10.9).
+  ENGAGEMENT_CLASSIFIER_TIMEOUT_MS: Joi.number().integer().min(1).default(10000).messages({
+    'number.base': 'ENGAGEMENT_CLASSIFIER_TIMEOUT_MS must be a number of milliseconds.',
+  }),
+
+  // Timeout (ms) da inferência do prazo de adiamento (R11.4).
+  ENGAGEMENT_DEFERRAL_INFER_TIMEOUT_MS: Joi.number().integer().min(1).default(30000).messages({
+    'number.base': 'ENGAGEMENT_DEFERRAL_INFER_TIMEOUT_MS must be a number of milliseconds.',
+  }),
+
+  // Limiar mínimo de confiança; abaixo dele -> interesse_normal (R10.6).
+  ENGAGEMENT_CONFIDENCE_THRESHOLD: Joi.number().min(0).max(1).default(0.70).messages({
+    'number.base': 'ENGAGEMENT_CONFIDENCE_THRESHOLD must be a number between 0 and 1.',
+    'number.min': 'ENGAGEMENT_CONFIDENCE_THRESHOLD must be a number between 0 and 1.',
+    'number.max': 'ENGAGEMENT_CONFIDENCE_THRESHOLD must be a number between 0 and 1.',
+  }),
+
+  // Modelo da chamada curta de classificação (opcional; usa o provider padrão quando vazio).
+  ENGAGEMENT_CLASSIFIER_MODEL: Joi.string().allow('').default(''),
 })
   // The frozen engine uses OpenAIProviderService for BOTH "openai" and
   // "openrouter" (it reads OPENAI_API_KEY / OPENAI_BASE_URL). So at least one

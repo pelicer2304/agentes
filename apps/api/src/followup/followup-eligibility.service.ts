@@ -17,12 +17,14 @@ import {
 @Injectable()
 export class FollowUpEligibilityService {
   /**
-   * Avalia a elegibilidade de uma Conversation para follow-up (R2.1, R4.1).
+   * Avalia a elegibilidade de uma Conversation para follow-up (R2.1, R4.1, R12.2).
    *
    * Não elegível por `handoff_humano` quando qualquer condição de
    * encaminhamento ao humano for verdadeira; essas condições têm precedência
-   * sobre o status `perdido`. Não elegível por `lead_perdido` quando o status
-   * do lead é `perdido` e essa é a única causa. Caso contrário, elegível.
+   * sobre o status `perdido` e sobre o opt-out. Não elegível por `lead_perdido`
+   * quando o status do lead é `perdido` e essa é a única causa restante. Não
+   * elegível por `opt_out` quando o lead solicitou parar de receber mensagens e
+   * essa é a única causa. Caso contrário, elegível.
    */
   evaluate(snapshot: ConversationSnapshot): EligibilityResult {
     const handoff =
@@ -39,6 +41,10 @@ export class FollowUpEligibilityService {
 
     if (snapshot.leadStatus === 'perdido') {
       return { eligible: false, reason: 'lead_perdido' };
+    }
+
+    if (snapshot.optedOut) {
+      return { eligible: false, reason: 'opt_out' };
     }
 
     return { eligible: true, reason: null };

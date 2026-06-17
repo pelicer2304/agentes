@@ -25,12 +25,19 @@ export class OpenAIProviderService implements LLMProvider {
   }
 
   async complete(request: LLMCompletionRequest): Promise<LLMCompletionResponse> {
+    // A per-request model override (when non-empty) takes precedence over the
+    // configured primary model; the configured fallback is still used on error.
+    const primaryModel =
+      request.model && request.model.trim().length > 0
+        ? request.model.trim()
+        : this.primaryModel;
+
     // Try primary model first
     try {
-      return await this.callModel(this.primaryModel, request);
+      return await this.callModel(primaryModel, request);
     } catch (error) {
       this.logger.warn(
-        `Primary model (${this.primaryModel}) failed: ${error instanceof Error ? error.message : 'Unknown'}. Trying fallback...`,
+        `Primary model (${primaryModel}) failed: ${error instanceof Error ? error.message : 'Unknown'}. Trying fallback...`,
       );
     }
 

@@ -209,7 +209,9 @@ model FollowUpSchedule {
   leadId         String @map("lead_id") @db.Uuid
 
   // Estado do ciclo: 'active' (em andamento), 'cancelled' (cancelado por
-  // handoff/perdido/resposta), 'completed' (esgotou os 3 niveis).
+  // handoff/perdido/resposta), 'completed' (esgotou os 3 niveis) e
+  // 'opted_out' (lead pediu para parar de receber follow-ups, R12.2).
+  // Apenas um novo valor textual de VARCHAR; o tipo da coluna nao muda.
   cycleState String @default("active") @map("cycle_state") @db.VarChar(20)
 
   // Instante a partir do qual a inatividade e medida (Inactivity_Anchor).
@@ -236,6 +238,11 @@ model FollowUpSchedule {
   // Tentativas adiadas do disparo corrente (janela/rate-limit/erro), p/ o
   // limite maximo de reenvios (R9.5).
   deferredAttempts Int @default(0) @map("deferred_attempts") @db.SmallInt
+
+  // R11: disparo pendente e um Deferred_Followup (substitui o Nivel 1).
+  deferred Boolean @default(false) @map("deferred")
+  // R11: Deferral_Offset aplicado, em horas (default 5h ou Inferred_Deferral).
+  deferralOffsetHours Int? @map("deferral_offset_hours") @db.SmallInt
 
   lastError String? @map("last_error") @db.VarChar(2000)
 

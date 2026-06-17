@@ -8,6 +8,8 @@ A regra mais importante é de **elegibilidade**: um lead que já foi encaminhado
 
 O escopo desta feature é a **decisão e o agendamento** do follow-up e o registro dos eventos. A composição textual final reaproveita o mecanismo de geração de resposta já existente, mas a feature define o contexto e o gatilho.
 
+Esta evolução acrescenta **detecção contextual de engajamento** ao ciclo. Em cada turno, o sistema classifica a intenção de engajamento do Lead — interesse normal, "me chama depois" (adiamento) ou "não me contate mais" (opt-out) — usando análise contextual de um modelo de linguagem (LLM) que considera a pergunta anterior do bot e a resposta do Lead, em vez de listas de palavras-chave fixas. Essa mudança corrige um comportamento em que uma desistência educada (por exemplo, "não, eu volto a te acionar quando eu quiser") era erroneamente tratada como pedido de atendimento humano. A partir desta classificação, o follow-up passa a oferecer um **follow-up adiado** quando o Lead pede para ser chamado mais tarde e um **opt-out definitivo** quando o Lead pede para parar, sem nunca escalar essas situações para o time humano.
+
 ## Glossary
 
 - **Follow_Up_Service**: componente responsável por agendar, avaliar a elegibilidade, disparar e cancelar os follow-ups de uma conversa.
@@ -22,6 +24,16 @@ O escopo desta feature é a **decisão e o agendamento** do follow-up e o regist
 - **Follow_Up_Event**: registro de auditoria gravado na tabela `bot_events` descrevendo um disparo, cancelamento ou encerramento de follow-up.
 - **Evolution_Channel**: integração de envio de mensagens WhatsApp via Evolution API.
 - **Rate_Limiter**: componente existente que impõe limites de frequência de envio por destinatário.
+- **Engagement_Intent**: classificação contextual da intenção de engajamento do Lead em um turno, com valores em {`interesse_normal`, `nao_agora`, `opt_out`}. `interesse_normal` indica interesse comum ou ausência de sinal de desengajamento; `nao_agora` indica pedido de adiamento ("me chama depois"); `opt_out` indica pedido explícito para parar de receber mensagens.
+- **Engagement_Classifier**: componente que determina o Engagement_Intent de um turno a partir de análise contextual do LLM, reaproveitando o Agent_Analysis_Service, considerando o Turn_Context e nunca listas de palavras-chave fixas.
+- **Agent_Analysis_Service**: serviço existente (`AgentAnalysisService`) que executa um LLM sobre o histórico da conversa e devolve um resultado estruturado em JSON, reaproveitado para produzir o Engagement_Intent.
+- **Turn_Context**: par formado pela última pergunta ou mensagem outbound do bot e pela mensagem inbound do Lead que a respondeu, usado como entrada para a classificação contextual do Engagement_Intent.
+- **Deferred_Followup**: Follow_Up_Level agendado em substituição ao Nível 1 quando o Engagement_Intent é `nao_agora`, disparado após o Deferral_Offset em vez de 1 hora.
+- **Deferral_Offset**: intervalo de tempo até o disparo de um Deferred_Followup. Igual ao Default_Deferral_Offset quando o Lead não indica prazo, ou ao prazo inferido pelo LLM (Inferred_Deferral) quando o Lead indica um prazo.
+- **Default_Deferral_Offset**: intervalo padrão configurável para o Deferred_Followup, com valor padrão de 5 horas.
+- **Inferred_Deferral**: intervalo de tempo inferido pelo LLM a partir do prazo indicado pelo Lead (por exemplo, "amanhã de manhã", "semana que vem", "mês que vem"), aplicado sem limite superior.
+- **Opt_Out**: estado em que o Lead solicitou explicitamente parar de receber mensagens, tornando a Conversation não elegível para novos follow-ups até que o Lead manifeste interesse normal genuíno.
+- **Disengagement_Signal**: sinal de desengajamento (`nao_agora` ou `opt_out`) derivado do Engagement_Intent, que por si só nunca dispara encaminhamento ao time humano.
 
 ## Requirements
 
@@ -139,3 +151,60 @@ O escopo desta feature é a **decisão e o agendamento** do follow-up e o regist
 4. IF o Evolution_Channel retorna falha no envio de uma Reengagement_Message, THEN THE Follow_Up_Service SHALL registrar um Follow_Up_Event de erro com o motivo `evolution_error`, manter o Follow_Up_Level como não enviado e preservar a Reengagement_Message como pendente.
 5. IF o número de tentativas adiadas de uma Reengagement_Message atinge o limite máximo configurado de reenvios, THEN THE Follow_Up_Service SHALL registrar um Follow_Up_Event de erro indicando o esgotamento das tentativas e interromper novos disparos para esse Follow_Up_Level.
 6. WHEN o Evolution_Channel confirma o envio de uma Reengagement_Message, THE Follow_Up_Service SHALL atualizar o `lastOutboundAt` da Conversation com o instante (timestamp) do envio confirmado.
+
+### Requisito 10: Detecção contextual de desengajamento
+
+**História do usuário:** Como operador comercial, quero que o sistema entenda, pelo contexto da conversa, quando o lead quer adiar ou parar de ser contatado, para que respostas educadas de adiamento ou recusa não sejam tratadas como interesse, nem escaladas indevidamente.
+
+#### Critérios de Aceitação
+
+1. WHEN uma mensagem inbound do Lead é recebida em um turno, THE Engagement_Classifier SHALL classificar o Engagement_Intent desse turno em exatamente um valor dentre {`interesse_normal`, `nao_agora`, `opt_out`} a partir de análise contextual do LLM aplicada ao Turn_Context.
+2. THE Engagement_Classifier SHALL determinar o Engagement_Intent utilizando o Turn_Context, que inclui a última pergunta ou mensagem outbound do bot e a mensagem inbound do Lead que a respondeu.
+3. THE Engagement_Classifier SHALL determinar o Engagement_Intent sem utilizar listas de palavras-chave fixas como critério de classificação.
+4. THE Engagement_Classifier SHALL classificar o Engagement_Intent como `nao_agora` apenas quando o Lead expressa explicitamente intenção de ser contatado mais tarde, e como `opt_out` apenas quando o Lead expressa explicitamente intenção de parar de ser contatado.
+5. IF a mensagem inbound do Lead, no Turn_Context, descreve um fato do negócio do Lead (por exemplo, como os clientes dele interagem com ele) em resposta a uma pergunta do bot, THEN THE Engagement_Classifier SHALL classificar o Engagement_Intent como `interesse_normal`, mesmo que a mensagem contenha negações.
+6. WHEN o grau de confiança da classificação do LLM é inferior a 0,70 ou há empate entre classes, THE Engagement_Classifier SHALL classificar o Engagement_Intent como `interesse_normal`.
+7. WHEN o bot pergunta como os clientes do Lead o acionam e o Lead responde que os clientes não o chamam e que é ele quem chama os clientes, THE Engagement_Classifier SHALL classificar o Engagement_Intent como `interesse_normal`.
+8. THE Follow_Up_Service SHALL tratar o Disengagement_Signal de um turno como insuficiente, por si só, para encaminhar a Conversation ao time humano.
+9. IF a análise contextual do LLM falha ou excede 10 segundos, THEN THE Engagement_Classifier SHALL classificar o Engagement_Intent como `interesse_normal` e SHALL registrar uma indicação da falha de classificação.
+
+### Requisito 11: Follow-up adiado por pedido de adiamento
+
+**História do usuário:** Como operador comercial, quero que um lead que pede para ser chamado depois receba um follow-up adiado no prazo certo, para respeitar o tempo do lead sem perder o contato.
+
+#### Critérios de Aceitação
+
+1. WHEN o Engagement_Intent de um turno é `nao_agora`, THE Follow_Up_Service SHALL agendar um Deferred_Followup em substituição ao Follow_Up_Level 1 dessa Conversation, em vez de agendar o Follow_Up_Level 1 para 1 hora após o Inactivity_Anchor.
+2. WHEN o Engagement_Intent de um turno é `nao_agora` e o Lead não indica prazo, THE Follow_Up_Service SHALL definir o Deferral_Offset como o Default_Deferral_Offset, cujo valor padrão é 5 horas.
+3. WHEN o Engagement_Intent de um turno é `nao_agora` e o Lead indica um prazo, THE Follow_Up_Service SHALL definir o Deferral_Offset como o Inferred_Deferral inferido pelo LLM a partir do prazo indicado pelo Lead, limitado a um valor mínimo de 1 hora e sem aplicar limite superior.
+4. IF o Engagement_Intent de um turno é `nao_agora` e o Lead indica um prazo, mas o LLM não retorna um Inferred_Deferral válido (falha de inferência, tempo de inferência acima de 30 segundos, ou valor inferido menor que 1 hora), THEN THE Follow_Up_Service SHALL definir o Deferral_Offset como o Default_Deferral_Offset de 5 horas e registrar a Conversation como elegível para o Deferred_Followup.
+5. WHEN um Deferred_Followup é disparado sem que o Lead registre mensagem inbound, THE Follow_Up_Service SHALL retomar a cadência normal agendando o Follow_Up_Level seguinte para 24 horas após o disparo do Deferred_Followup e o Follow_Up_Level subsequente para 48 horas após o disparo do Deferred_Followup.
+6. WHEN o Engagement_Intent de um turno é `nao_agora`, THE Follow_Up_Service SHALL enviar ao Lead, em até 30 segundos após a classificação do turno, uma mensagem de reconhecimento que confirma o adiamento e informa que o contato será retomado no prazo definido pelo Deferral_Offset, mantendo a Conversation sem encaminhamento ao time humano.
+7. IF o Lead registra uma mensagem inbound antes do disparo do Deferred_Followup agendado, THEN THE Follow_Up_Service SHALL cancelar o Deferred_Followup agendado e remover a classificação de elegibilidade para o Deferred_Followup dessa Conversation.
+8. WHILE o Engagement_Intent corrente de uma Conversation é `nao_agora`, THE Follow_Up_Service SHALL manter a Conversation classificada como elegível para o Deferred_Followup.
+
+### Requisito 12: Opt-out definitivo
+
+**História do usuário:** Como operador comercial, quero que um lead que pede explicitamente para parar de receber mensagens não receba mais follow-ups, para respeitar a decisão do lead e evitar contato indesejado.
+
+#### Critérios de Aceitação
+
+1. WHEN o Engagement_Intent de um turno é `opt_out`, THE Follow_Up_Service SHALL cancelar todos os Follow_Up_Level pendentes da Conversation em até 5 segundos após o registro da mensagem inbound e SHALL não reiniciar o ciclo de follow-up em decorrência dessa mensagem inbound.
+2. WHEN o Engagement_Intent de um turno é `opt_out`, THE Follow_Up_Service SHALL persistir a Conversation no estado Opt_Out e SHALL classificá-la como não elegível para qualquer novo Follow_Up_Level enquanto permanecer nesse estado.
+3. WHEN o Engagement_Intent de um turno é `opt_out`, THE Follow_Up_Service SHALL NOT classificar a mensagem inbound como pedido nem como aceitação de atendimento humano e SHALL não encaminhar a Conversation ao time humano.
+4. IF uma Conversation está no estado Opt_Out e o Lead envia posteriormente uma mensagem inbound cujo Engagement_Intent é `interesse_normal`, THEN THE Follow_Up_Service SHALL remover o estado Opt_Out, redefinir o Inactivity_Anchor para o instante dessa mensagem inbound e reiniciar o ciclo normal de follow-up a partir do Follow_Up_Level 1 conforme o Requisito 3.
+5. WHEN um ciclo de follow-up é cancelado por opt-out, THE Follow_Up_Service SHALL registrar exatamente um Follow_Up_Event do tipo `followup_cancelled` contendo o `conversationId`, o `leadId`, o motivo `opt_out` e o instante de ocorrência com precisão de milissegundos.
+6. WHILE a Conversation está no estado Opt_Out, THE Follow_Up_Service SHALL processar turnos repetidos de `opt_out` de forma idempotente, sem cancelar novamente nem duplicar o Follow_Up_Event de cancelamento.
+7. IF a persistência do estado Opt_Out ou do cancelamento falha, THEN THE Follow_Up_Service SHALL preservar os Follow_Up_Level pendentes, suprimir novos envios e registrar um Follow_Up_Event de erro.
+
+### Requisito 13: Roteamento de intenção sem escalonamento indevido
+
+**História do usuário:** Como operador comercial, quero que pedidos de adiamento ou de parar não sejam confundidos com pedido de atendimento humano, para que o bot não escale o lead por engano no mesmo turno.
+
+#### Critérios de Aceitação
+
+1. IF o Engagement_Intent de um turno é `nao_agora` ou `opt_out`, THEN THE Follow_Up_Service SHALL NOT classificar a mensagem inbound como pedido de atendimento humano.
+2. IF o Engagement_Intent de um turno é `nao_agora` ou `opt_out`, THEN THE Follow_Up_Service SHALL NOT classificar a mensagem inbound como aceitação de encaminhamento ao time humano.
+3. THE Engagement_Classifier SHALL concluir e disponibilizar o Engagement_Intent do turno antes da geração da resposta desse turno.
+4. WHEN a resposta de um turno é gerada, THE Follow_Up_Service SHALL aplicar o Engagement_Intent do turno corrente à decisão de resposta, sem depender exclusivamente da análise assíncrona de CRM executada após o turno.
+5. IF o Engagement_Intent não pode ser determinado no turno, THEN THE Follow_Up_Service SHALL tratar o turno como `interesse_normal` e preservar a garantia de não escalonar a Conversation ao time humano com base em desengajamento.

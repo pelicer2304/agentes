@@ -260,4 +260,41 @@ export class AppConfigService {
     const value = this.configService.get<number>('FOLLOWUP_POLL_INTERVAL_MS');
     return typeof value === 'number' ? value : 30000;
   }
+
+  // --- Lead follow-up evolution: deferral + engagement classification ---
+
+  /** Deferral_Offset padrão do follow-up adiado, em horas (R11.2). */
+  get followUpDefaultDeferralHours(): number {
+    const value = this.configService.get<number>('FOLLOWUP_DEFAULT_DEFERRAL_HOURS');
+    return typeof value === 'number' ? value : 5;
+  }
+
+  /** Piso do Inferred_Deferral, em horas (R11.3). Sem teto. */
+  get followUpMinDeferralHours(): number {
+    const value = this.configService.get<number>('FOLLOWUP_MIN_DEFERRAL_HOURS');
+    return typeof value === 'number' ? value : 1;
+  }
+
+  /** Timeout (em ms) da classificação de engajamento no turno (R10.9). */
+  get engagementClassifierTimeoutMs(): number {
+    const value = this.configService.get<number>('ENGAGEMENT_CLASSIFIER_TIMEOUT_MS');
+    return typeof value === 'number' ? value : 10000;
+  }
+
+  /** Timeout (em ms) da inferência do prazo de adiamento (R11.4). */
+  get engagementDeferralInferTimeoutMs(): number {
+    const value = this.configService.get<number>('ENGAGEMENT_DEFERRAL_INFER_TIMEOUT_MS');
+    return typeof value === 'number' ? value : 30000;
+  }
+
+  /** Limiar mínimo de confiança; abaixo dele a classe vira interesse_normal (R10.6). */
+  get engagementConfidenceThreshold(): number {
+    const value = this.configService.get<number>('ENGAGEMENT_CONFIDENCE_THRESHOLD');
+    return typeof value === 'number' ? value : 0.7;
+  }
+
+  /** Modelo da chamada curta de classificação; vazio usa o provider padrão. */
+  get engagementClassifierModel(): string {
+    return this.configService.get<string>('ENGAGEMENT_CLASSIFIER_MODEL') || '';
+  }
 }

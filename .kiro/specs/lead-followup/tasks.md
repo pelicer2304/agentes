@@ -196,6 +196,112 @@ Plano incremental para implementar o follow-up automático de leads no app `apps
 - [x] 13. Checkpoint final - garantir que os testes passam
   - Ensure all tests pass, ask the user if questions arise.
 
+- [x] 14. Fundação da evolução: dados, configuração e tipos (Requisitos 10–13)
+  - [x] 14.1 Criar a migração Prisma aditiva `add_followup_deferral_optout` e atualizar o schema
+    - Em `apps/api/prisma/schema.prisma`, adicionar ao modelo `FollowUpSchedule` os campos `deferred Boolean @default(false) @map("deferred")` e `deferralOffsetHours Int? @map("deferral_offset_hours") @db.SmallInt`
+    - Documentar no schema que `cycleState` passa a aceitar o novo valor textual `'opted_out'` (apenas novo valor de `VARCHAR`, sem alteração de tipo/coluna)
+    - Criar `apps/api/prisma/migrations/<timestamp>_add_followup_deferral_optout/migration.sql` aditiva com `ALTER TABLE "follow_up_schedules" ADD COLUMN "deferred" BOOLEAN NOT NULL DEFAULT false, ADD COLUMN "deferral_offset_hours" SMALLINT;`
+    - Regenerar o Prisma Client após a alteração do schema
+    - _Requirements: 11.1, 12.2_
+
+  - [x] 14.2 Estender os tipos, enums e snapshot do follow-up
+    - Em `apps/api/src/followup/followup.types.ts`, adicionar `EngagementIntent` (`'interesse_normal' | 'nao_agora' | 'opt_out'`), `TurnContext` (`lastBotMessage: string | null`, `leadMessage: string`) e `EngagementClassification` (`intent`, `confidence`, `deferral?: { durationHours?: number }`, `failSafe: boolean`)
+    - Adicionar `opt_out` ao tipo `CancelReason`
+    - Adicionar o campo booleano `optedOut` ao `ConversationSnapshot` (derivado de `cycleState === 'opted_out'`)
+    - _Requirements: 10.1, 12.2, 12.5_
+
+  - [x] 14.3 Adicionar e validar os novos parâmetros de configuração da evolução
+    - Em `apps/api/src/config/config.schema.ts` e `apps/api/src/config/config.service.ts`, adicionar via Joi com defaults seguros: `FOLLOWUP_DEFAULT_DEFERRAL_HOURS` (5), `FOLLOWUP_MIN_DEFERRAL_HOURS` (1), `ENGAGEMENT_CLASSIFIER_TIMEOUT_MS` (10000), `ENGAGEMENT_DEFERRAL_INFER_TIMEOUT_MS` (30000), `ENGAGEMENT_CONFIDENCE_THRESHOLD` (0.70), `ENGAGEMENT_CLASSIFIER_MODEL` ('')
+    - Expor os valores tipados no `ConfigService` para consumo pelo classificador e pelo `FollowUpService`
+    - _Requirements: 10.6, 10.9, 11.2, 11.3, 11.4_
+
+- [x] 15. Implementar o `EngagementClassifierService` (classificador síncrono e leve do turno)
+  - [x] 15.1 Implementar `EngagementClassifierService.classify(ctx: TurnContext)`
+    - Criar `apps/api/src/followup/engagement-classifier.service.ts` usando a `LLMProvider` existente (`complete({ responseFormat: 'json' })`) com uma chamada curta (prompt mínimo, temperatura baixa), sem listas de palavras-chave fixas (R10.3)
+    - Validar e normalizar o JSON `{ engagementIntent, confidence, deferral? }`; mapear sempre para exatamente um valor de `EngagementIntent`
+    - Rebaixar para `interesse_normal` quando `confidence < ENGAGEMENT_CONFIDENCE_THRESHOLD` ou houver empate/ambiguidade (R10.6), inclusive o caso de fato de negócio com negações (R10.5, R10.7)
+    - Aplicar `Promise.race` com timeout de `ENGAGEMENT_CLASSIFIER_TIMEOUT_MS` (10s); em timeout, erro ou parse inválido, retornar `interesse_normal` com `failSafe = true` e registrar log de aviso (R10.9)
+    - Quando `intent === 'nao_agora'` e o lead indica prazo, preencher `deferral.durationHours` inferido pelo LLM (opcional)
+    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.9_
+
+  - [x]* 15.2 Escrever testes de propriedade do classificador (LLM mockado)
+    - Em `apps/api/src/followup/engagement-classifier.property.spec.ts`, gerar retornos do LLM arbitrários (JSON inválido, classes desconhecidas, `confidence ∈ [0,1]`), com a `LLMProvider` fakeada
+    - **Property 18: Classificação de engajamento é total e segura sob baixa confiança** (inclui o fato de negócio com negações)
+    - **Property 19: Fail-safe da classificação por timeout/erro/indeterminação**
+    - Tags: `// Feature: lead-followup, Property 18: ...` e `// Feature: lead-followup, Property 19: ...`
+    - _Properties: 18, 19_
+    - _Requirements: 10.1, 10.4, 10.5, 10.6, 10.7, 10.9, 13.5_
+
+  - [x]* 15.3 Escrever testes de exemplo adversariais de falso positivo (OBRIGATÓRIOS)
+    - Em `apps/api/src/followup/engagement-classifier.spec.ts`, com a `LLMProvider` fakeada, verificar que as mensagens "não, eu volto a te acionar quando eu quiser" e "os clientes não me chamam, eu que chamo eles" resultam em `interesse_normal`
+    - _Requirements: 10.7_
+
+- [x] 16. Incorporar o opt-out na elegibilidade
+  - [x] 16.1 Atualizar `FollowUpEligibilityService.evaluate` para o estado Opt_Out
+    - Em `apps/api/src/followup/followup-eligibility.service.ts`, marcar não elegível quando `optedOut` for verdadeiro, com `reason = 'opt_out'` quando o opt-out for a única causa de inelegibilidade, preservando a precedência de rotulagem de `handoff_humano` e `lead_perdido`
+    - _Requirements: 12.2_
+
+  - [x]* 16.2 Estender o teste de propriedade da elegibilidade com o opt-out
+    - Em `apps/api/src/followup/followup-eligibility.service.spec.ts`, gerar `ConversationSnapshot` com `optedOut` arbitrário
+    - **Property 21: Elegibilidade incorpora o estado Opt_Out**
+    - Tag: `// Feature: lead-followup, Property 21: ...`
+    - _Properties: 21_
+    - _Requirements: 12.2_
+
+- [x] 17. Implementar o follow-up adiado e o opt-out no `FollowUpService`
+  - [x] 17.1 Implementar `scheduleDeferred(conversationId, offsetHours, now)`
+    - Em `apps/api/src/followup/followup.service.ts`, agendar um `Deferred_Followup` em substituição ao Nível 1: `inactivityAnchor = now`, `maxSentLevel = 0`, `pendingLevel = 1`, `deferred = true`, `deferralOffsetHours = offsetHours`, `nextRunAt = now + offsetHours`
+    - Resolver o `Deferral_Offset`: sem prazo → `FOLLOWUP_DEFAULT_DEFERRAL_HOURS` (5h); com `Inferred_Deferral` válido → o valor inferido com piso de `FOLLOWUP_MIN_DEFERRAL_HOURS` (1h) e sem teto; prazo indicado mas inferência inválida/ausente/`< 1h`/timeout → fallback de 5h, mantendo a conversa elegível para o adiado
+    - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.8_
+
+  - [x] 17.2 Adaptar `handleSent` para a retomada da cadência após o adiado
+    - Em `apps/api/src/followup/followup.service.ts`, quando `deferred === true` e `level === 1`, retomar a cadência a partir do `sentAt`: agendar o Nível 2 para `sentAt + 24h` e o Nível 3 para `sentAt + 48h`, e desativar o flag `deferred`
+    - _Requirements: 11.5_
+
+  - [x] 17.3 Implementar `onOptOut(conversationId, now)`
+    - Em `apps/api/src/followup/followup.service.ts`, cancelar todos os níveis pendentes em até 5s, persistir `cycleState = 'opted_out'`, não reiniciar o ciclo e registrar exatamente um `followup_cancelled` com motivo `opt_out` (instante com precisão de ms); idempotente sob turnos repetidos de opt-out (segunda execução: no-op)
+    - Em falha de persistência, preservar os níveis pendentes, suprimir novos envios e registrar `followup_error`
+    - _Requirements: 12.1, 12.2, 12.5, 12.6, 12.7_
+
+  - [x] 17.4 Implementar `resumeFromOptOut(conversationId, now)`
+    - Em `apps/api/src/followup/followup.service.ts`, ao receber um turno posterior `interesse_normal` em conversa `opted_out`, remover o estado Opt_Out, redefinir o `Inactivity_Anchor` para `now` e reiniciar o ciclo a partir do Nível 1 (delegando ao mesmo caminho de reinício do `onInboundReceived`)
+    - _Requirements: 12.4_
+
+  - [x]* 17.5 Escrever testes de propriedade do `FollowUpService` para a evolução (fakes em memória)
+    - Em `apps/api/src/followup/followup.service.deferral-optout.property.spec.ts`, com Prisma/Evolution/RateLimiter fakeados e relógio injetado
+    - **Property 22: nao_agora agenda o Deferred_Followup substituindo o Nível 1**
+    - **Property 23: Resolução do Deferral_Offset (default, inferido com piso, fallback)**
+    - **Property 24: Disparo do Deferred_Followup retoma a cadência normal**
+    - **Property 25: Opt-out cancela sem reiniciar, é idempotente e registra um único evento; reentrada reinicia no Nível 1**
+    - Tags: `// Feature: lead-followup, Property 22: ...` ... `Property 25: ...`
+    - _Properties: 22, 23, 24, 25_
+    - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.8, 12.1, 12.4, 12.5, 12.6_
+
+- [x] 18. Integrar a classificação no pipeline do turno e o roteamento sem escalonamento indevido
+  - [x] 18.1 Integrar o `EngagementClassifierService` no `ConversationService.handleInboundMessage`
+    - Em `apps/api/src/.../conversation.service.ts`, inserir a resolução do Engagement_Intent entre `resolveIntent` (passo 7) e a decisão de handoff (passo 8), concluindo antes da geração da resposta (R13.3, R13.4)
+    - Aplicar a heurística de gating barata e determinística: só chamar o LLM quando houver follow-up pendente/ativo (`cycleState ∈ {active, opted_out}`), estado `suggested`, lead qualificado (`qualificationReadyForOffer`), ou negação combinada a referência temporal/recusa; caso contrário assumir `interesse_normal` sem chamar o LLM
+    - _Requirements: 10.8, 13.1, 13.2, 13.3, 13.4, 13.5_
+
+  - [x] 18.2 Implementar o early-branch de desfecho por Engagement_Intent
+    - Em `apps/api/src/.../conversation.service.ts`, após resolver o Engagement_Intent: `nao_agora` → resposta determinística de reconhecimento do adiamento (≤30s) + `FollowUpService.scheduleDeferred`, sem handoff; `opt_out` → confirmação determinística de baixa + `FollowUpService.onOptOut`, sem handoff; `interesse_normal` em conversa `opted_out` → `FollowUpService.resumeFromOptOut`
+    - Garantir que `nao_agora`/`opt_out` NUNCA marquem `finalHandoff` nem sejam tratados como `handoff_accept` (curto-circuitando a regra de auto-escala do `general` em `suggested` — corrige o bug do "quando")
+    - _Requirements: 10.8, 11.6, 12.3, 12.4, 13.1, 13.2_
+
+  - [x]* 18.3 Escrever teste de propriedade de roteamento do desengajamento
+    - Em `apps/api/src/.../conversation.service.engagement-routing.property.spec.ts`, gerar estados de handoff arbitrários (`none`, `suggested`, `accepted`) com Engagement_Intent `nao_agora`/`opt_out`
+    - **Property 20: Desengajamento nunca escala para o time humano**
+    - Tag: `// Feature: lead-followup, Property 20: ...`
+    - _Properties: 20_
+    - _Requirements: 10.8, 12.3, 13.1, 13.2_
+
+  - [x]* 18.4 Escrever testes de integração do turno
+    - Verificar, com fakes do classificador/FollowUpService, que um inbound `nao_agora` aciona `scheduleDeferred` sem handoff, que um inbound `opt_out` aciona `onOptOut` sem handoff, e que a classificação é concluída antes da geração da resposta (sem depender da análise assíncrona de CRM)
+    - _Requirements: 13.3, 13.4_
+
+- [x] 19. Checkpoint final da evolução - garantir que todos os testes passam e o build está limpo
+  - Ensure all tests pass, ask the user if questions arise.
+
 ## Notes
 
 - Tarefas marcadas com `*` são opcionais (testes) e podem ser puladas para um MVP mais rápido; as tarefas de implementação principal nunca são opcionais.
@@ -206,23 +312,20 @@ Plano incremental para implementar o follow-up automático de leads no app `apps
 
 ## Task Dependency Graph
 
+As tarefas 1–13 já estão concluídas e não constam do grafo. As ondas abaixo cobrem apenas as tarefas incompletas da evolução (14–18), respeitando conflitos de arquivo: `17.1`–`17.4` editam `followup.service.ts` (ondas separadas) e `18.1`–`18.2` editam `conversation.service.ts` (ondas separadas).
+
 ```json
 {
   "waves": [
-    { "id": 0, "tasks": ["1.1", "1.2", "2.1"] },
-    { "id": 1, "tasks": ["2.2", "3.1", "4.1", "5.1", "6.1"] },
-    { "id": 2, "tasks": ["3.2", "4.2", "5.2", "6.2", "7.1"] },
-    { "id": 3, "tasks": ["4.3", "7.2", "7.3", "8.1"] },
-    { "id": 4, "tasks": ["8.2"] },
-    { "id": 5, "tasks": ["8.3"] },
-    { "id": 6, "tasks": ["8.4"] },
-    { "id": 7, "tasks": ["8.5"] },
-    { "id": 8, "tasks": ["8.6", "8.7", "10.1"] },
-    { "id": 9, "tasks": ["10.2", "11.1"] },
-    { "id": 10, "tasks": ["11.2"] },
-    { "id": 11, "tasks": ["12.1", "12.2"] },
-    { "id": 12, "tasks": ["12.3"] },
-    { "id": 13, "tasks": ["12.4"] }
+    { "id": 0, "tasks": ["14.1", "14.2", "14.3"] },
+    { "id": 1, "tasks": ["15.1", "16.1"] },
+    { "id": 2, "tasks": ["15.2", "15.3", "16.2", "17.1"] },
+    { "id": 3, "tasks": ["17.2"] },
+    { "id": 4, "tasks": ["17.3"] },
+    { "id": 5, "tasks": ["17.4"] },
+    { "id": 6, "tasks": ["17.5", "18.1"] },
+    { "id": 7, "tasks": ["18.2"] },
+    { "id": 8, "tasks": ["18.3", "18.4"] }
   ]
 }
 ```

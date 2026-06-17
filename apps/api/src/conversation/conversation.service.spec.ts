@@ -12,6 +12,8 @@ import { ResponseGuardService } from '../agent/response-guard.service';
 import { PricingConfigService } from '../inbound/pricing-config.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 import { FollowUpService } from '../followup/followup.service';
+import { EngagementClassifierService } from '../followup/engagement-classifier.service';
+import { AppConfigService } from '../config/config.service';
 import { classifyEdgeInput, edgeReply } from '../agent/edge-input';
 
 /**
@@ -79,6 +81,9 @@ describe('ConversationService', () => {
       agentAnalysis: {
         create: jest.fn(),
       },
+      followUpSchedule: {
+        findUnique: jest.fn().mockResolvedValue(null),
+      },
       $transaction: jest.fn(),
     };
 
@@ -125,6 +130,21 @@ describe('ConversationService', () => {
       ensureScheduled: jest.fn().mockResolvedValue(undefined),
       onInboundReceived: jest.fn().mockResolvedValue(undefined),
       onLeadLost: jest.fn().mockResolvedValue(undefined),
+      scheduleDeferred: jest.fn().mockResolvedValue(undefined),
+      onOptOut: jest.fn().mockResolvedValue(undefined),
+      resumeFromOptOut: jest.fn().mockResolvedValue(undefined),
+    };
+
+    // Default: the engagement classifier returns the safe class so existing
+    // pipeline behavior (handoff, desistance, etc.) is unchanged.
+    const mockEngagementClassifier = {
+      classify: jest
+        .fn()
+        .mockResolvedValue({ intent: 'interesse_normal', confidence: 0, failSafe: true }),
+    };
+
+    const mockConfig = {
+      followUpDefaultDeferralHours: 5,
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -141,6 +161,8 @@ describe('ConversationService', () => {
         { provide: PricingConfigService, useValue: mockPricingConfig },
         { provide: KnowledgeService, useValue: mockKnowledge },
         { provide: FollowUpService, useValue: mockFollowUpService },
+        { provide: EngagementClassifierService, useValue: mockEngagementClassifier },
+        { provide: AppConfigService, useValue: mockConfig },
       ],
     }).compile();
 

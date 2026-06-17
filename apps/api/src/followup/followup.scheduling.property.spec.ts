@@ -27,9 +27,12 @@ import {
 const MS_PER_HOUR = 60 * 60 * 1000;
 
 // Reasonable date range generator: avoids overflow on +offset arithmetic.
+// `noInvalidDate` keeps the generator within the realistic input space — Prisma
+// always yields valid `Date` instances (or null), never an Invalid Date (NaN).
 const dateArb: fc.Arbitrary<Date> = fc.date({
   min: new Date('2000-01-01T00:00:00.000Z'),
   max: new Date('2100-01-01T00:00:00.000Z'),
+  noInvalidDate: true,
 });
 
 describe('followup-scheduling — property-based', () => {

@@ -10,11 +10,11 @@ import {
  *
  * A lógica de elegibilidade é uma função pura, total e determinística
  * (R2.1, R4.1). Estes testes geram `ConversationSnapshot` cobrindo todas as
- * flags de handoff e os status de lead/conversa para validar a Property 1 do
- * design (.kiro/specs/lead-followup/design.md).
+ * flags de handoff e os status de lead/conversa para validar a Property 1 e a
+ * Property 21 do design (.kiro/specs/lead-followup/design.md).
  *
  * Feature: lead-followup
- * Requirements: 2.1, 4.1
+ * Requirements: 2.1, 4.1, 12.2
  */
 
 // Status de lead relevantes para a regra de elegibilidade.
@@ -52,10 +52,12 @@ const snapshotArb: fc.Arbitrary<ConversationSnapshot> = fc.record({
   handoffAccepted: fc.boolean(),
   handoffCompleted: fc.boolean(),
   handoffRequired: fc.boolean(),
+  optedOut: fc.boolean(),
 });
 
 // Modelo de referência independente da implementação: alguma condição de
-// handoff verdadeira torna não elegível com precedência sobre `perdido`.
+// handoff verdadeira torna não elegível com a maior precedência de rotulagem,
+// seguida por `lead_perdido` e, por fim, `opt_out` (R12.2).
 const isHandoffCause = (s: ConversationSnapshot): boolean =>
   s.leadStatus === 'chamar_humano' ||
   s.handoffAccepted ||
@@ -66,6 +68,8 @@ const isHandoffCause = (s: ConversationSnapshot): boolean =>
 
 const isLostCause = (s: ConversationSnapshot): boolean =>
   s.leadStatus === 'perdido';
+
+const isOptOutCause = (s: ConversationSnapshot): boolean => s.optedOut;
 
 describe('FollowUpEligibilityService — property-based', () => {
   const service = new FollowUpEligibilityService();
@@ -78,25 +82,60 @@ describe('FollowUpEligibilityService — property-based', () => {
 
         const handoff = isHandoffCause(snapshot);
         const lost = isLostCause(snapshot);
-        const anyIneligibility = handoff || lost;
+        const optOut = isOptOutCause(snapshot);
+        const anyIneligibility = handoff || lost || optOut;
 
         // (a) Totalidade + correção do booleano: eligible=false SSE
         // alguma condição de não-elegibilidade for verdadeira.
         expect(result.eligible).toBe(!anyIneligibility);
 
-        // (b) reason correto: null quando elegível; 'handoff_humano' quando
-        // há causa de handoff (precedência); 'lead_perdido' apenas quando a
-        // ÚNICA causa é o status perdido.
+        // (b) reason correto: null quando elegível; caso contrário segue a
+        // precedência de rotulagem handoff_humano > lead_perdido > opt_out.
         if (!anyIneligibility) {
           expect(result.reason).toBeNull();
         } else if (handoff) {
           expect(result.reason).toBe('handoff_humano');
-        } else {
+        } else if (lost) {
           expect(result.reason).toBe('lead_perdido');
+        } else {
+          expect(result.reason).toBe('opt_out');
         }
 
         // (c) Determinismo: a mesma entrada produz exatamente o mesmo resultado.
         expect(service.evaluate(snapshot)).toEqual(result);
+      }),
+      { numRuns: 200 },
+    );
+  });
+
+  // Feature: lead-followup, Property 21: Elegibilidade incorpora o estado Opt_Out
+  it('eligible=false sempre que optedOut=true; reason=opt_out quando o opt-out é a única causa', () => {
+    fc.assert(
+      fc.property(snapshotArb, (snapshot) => {
+        const result: EligibilityResult = service.evaluate(snapshot);
+
+        // optedOut verdadeiro implica sempre inelegibilidade.
+        if (snapshot.optedOut) {
+          expect(result.eligible).toBe(false);
+        }
+
+        const handoff = isHandoffCause(snapshot);
+        const lost = isLostCause(snapshot);
+
+        // Quando o opt-out é a ÚNICA causa de inelegibilidade (sem handoff e
+        // sem lead_perdido), o reason rotulado é 'opt_out'.
+        if (snapshot.optedOut && !handoff && !lost) {
+          expect(result.eligible).toBe(false);
+          expect(result.reason).toBe('opt_out');
+        }
+
+        // Precedência de rotulagem: handoff e lead_perdido têm prioridade
+        // sobre o opt-out mesmo quando optedOut=true.
+        if (snapshot.optedOut && handoff) {
+          expect(result.reason).toBe('handoff_humano');
+        } else if (snapshot.optedOut && !handoff && lost) {
+          expect(result.reason).toBe('lead_perdido');
+        }
       }),
       { numRuns: 200 },
     );

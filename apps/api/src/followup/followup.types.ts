@@ -18,12 +18,14 @@ export interface ConversationSnapshot {
   handoffAccepted: boolean;
   handoffCompleted: boolean;
   handoffRequired: boolean;
+  optedOut: boolean; // derivado de cycleState === 'opted_out' (R12.2)
 }
 
 /** Motivos pelos quais uma Conversation é classificada como não elegível. */
 export type IneligibilityReason =
   | 'handoff_humano' // qualquer condição do R2.1
-  | 'lead_perdido'; // status do lead = perdido (R4.1)
+  | 'lead_perdido' // status do lead = perdido (R4.1)
+  | 'opt_out'; // lead pediu para parar de receber mensagens (R12.2)
 
 /** Resultado da avaliação de elegibilidade de uma Conversation para follow-up. */
 export interface EligibilityResult {
@@ -63,4 +65,29 @@ export type FollowUpEventType =
 export type CancelReason =
   | 'handoff_humano'
   | 'lead_perdido'
-  | 'resposta_do_lead';
+  | 'resposta_do_lead'
+  | 'opt_out';
+
+/**
+ * Intenção de engajamento detectada em um único turno (R10).
+ * - interesse_normal: qualquer coisa fora de adiamento/opt-out (classe segura).
+ * - nao_agora: o lead pede explicitamente para ser contatado mais tarde.
+ * - opt_out: o lead pede explicitamente para parar de receber mensagens.
+ */
+export type EngagementIntent = 'interesse_normal' | 'nao_agora' | 'opt_out';
+
+/** Par (pergunta do bot, resposta do lead) que forma o Turn_Context (R10.2). */
+export interface TurnContext {
+  lastBotMessage: string | null; // última pergunta/outbound do bot
+  leadMessage: string; // inbound do lead que respondeu
+}
+
+/** Resultado da classificação de engajamento de um turno (R10). */
+export interface EngagementClassification {
+  intent: EngagementIntent;
+  confidence: number; // 0..1
+  /** Presente apenas quando intent === 'nao_agora' e o lead indica prazo. */
+  deferral?: { durationHours?: number };
+  /** true quando o resultado veio do fail-safe (timeout/erro/baixa confiança). */
+  failSafe: boolean;
+}

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { ChannelModule } from '../channel/channel.module';
+import { LLMModule } from '../llm/llm.module';
 import { RateLimiterService } from '../common/rate-limiter';
 import { FollowUpService } from './followup.service';
 import { FollowUpSchedulerService } from './followup-scheduler.service';
@@ -8,6 +9,7 @@ import { FollowUpEligibilityService } from './followup-eligibility.service';
 import { ReengagementMessageComposer } from './reengagement-message.composer';
 import { FollowUpSender } from './followup-sender.service';
 import { FollowUpEventRecorder } from './followup-event.recorder';
+import { EngagementClassifierService } from './engagement-classifier.service';
 
 /**
  * Wires the automatic lead follow-up cycle (design.md — "FollowUpService" e
@@ -31,6 +33,8 @@ import { FollowUpEventRecorder } from './followup-event.recorder';
  *  - {@link ChannelModule} — exporta o `ChannelAdapterRegistry` usado pelo
  *    {@link FollowUpSender} para resolver o adapter do WhatsApp e entregar a
  *    mensagem de reengajamento.
+ *  - {@link LLMModule} — exporta o `LLM_PROVIDER_TOKEN` consumido pelo
+ *    {@link EngagementClassifierService} (mesmo padrão do `AgentModule`).
  *  - `PrismaService` está disponível globalmente via o `@Global()`
  *    `PrismaModule`, e `AppConfigService` via o `@Global()` `AppConfigModule`;
  *    portanto nenhum dos dois é re-importado aqui (mesmo padrão do
@@ -38,7 +42,7 @@ import { FollowUpEventRecorder } from './followup-event.recorder';
  *    follow-up depende dele.
  */
 @Module({
-  imports: [ChannelModule],
+  imports: [ChannelModule, LLMModule],
   providers: [
     FollowUpService,
     FollowUpSchedulerService,
@@ -46,8 +50,9 @@ import { FollowUpEventRecorder } from './followup-event.recorder';
     ReengagementMessageComposer,
     FollowUpSender,
     FollowUpEventRecorder,
+    EngagementClassifierService,
     RateLimiterService,
   ],
-  exports: [FollowUpService],
+  exports: [FollowUpService, EngagementClassifierService],
 })
 export class FollowUpModule {}

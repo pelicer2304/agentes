@@ -23,6 +23,9 @@ const CYCLE_STATE = {
   ACTIVE: 'active',
   CANCELLED: 'cancelled',
   COMPLETED: 'completed',
+  // Opt-out definitivo do lead (R12.2): o ciclo não reinicia até um turno
+  // posterior de interesse_normal (resumeFromOptOut).
+  OPTED_OUT: 'opted_out',
 } as const;
 
 /** Número máximo de tentativas de persistência do agendamento (R1.8). */
@@ -134,6 +137,73 @@ export class FollowUpService {
   }
 
   /**
+   * Agenda um `Deferred_Followup` em substituição ao Nível 1 (R11.1–R11.4,
+   * R11.8). É chamado pelo pipeline do turno quando o Engagement_Intent é
+   * `nao_agora`.
+   *
+   * O `offsetHours` chega já resolvido pela decisão default-vs-inferido do
+   * chamador; aqui garantimos o **fallback** para `FOLLOWUP_DEFAULT_DEFERRAL_HOURS`
+   * (5h) quando o valor é inválido (`<= 0`, `NaN`, não finito) e aplicamos o
+   * **piso** de `FOLLOWUP_MIN_DEFERRAL_HOURS` (1h), **sem teto** (R11.2–R11.4).
+   *
+   * Faz upsert do schedule reiniciando como adiado: `inactivityAnchor = now`,
+   * `maxSentLevel = 0`, `pendingLevel = 1`, `deferred = true`,
+   * `deferralOffsetHours = offset`, `nextRunAt = now + offset` (R11.1). A
+   * cadência normal (+24h/+48h) é retomada a partir do disparo do adiado em
+   * {@link handleSent}.
+   */
+  async scheduleDeferred(
+    conversationId: string,
+    offsetHours: number,
+    now: Date,
+  ): Promise<void> {
+    const conversation = await this.prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { leadId: true },
+    });
+
+    if (!conversation) {
+      // Sem conversa identificável não há o que agendar.
+      return;
+    }
+
+    const offset = this.resolveDeferralOffset(offsetHours);
+    const nextRunAt = new Date(now.getTime() + offset * 60 * 60 * 1000);
+
+    await this.prisma.followUpSchedule.upsert({
+      where: { conversationId },
+      create: {
+        conversationId,
+        leadId: conversation.leadId,
+        cycleState: CYCLE_STATE.ACTIVE,
+        inactivityAnchor: now,
+        maxSentLevel: 0,
+        pendingLevel: 1,
+        deferred: true,
+        deferralOffsetHours: offset,
+        nextRunAt,
+        level3FiredAt: null,
+        deferredAttempts: 0,
+        lockedUntil: null,
+        lastError: null,
+      },
+      update: {
+        cycleState: CYCLE_STATE.ACTIVE,
+        inactivityAnchor: now,
+        maxSentLevel: 0,
+        pendingLevel: 1,
+        deferred: true,
+        deferralOffsetHours: offset,
+        nextRunAt,
+        level3FiredAt: null,
+        deferredAttempts: 0,
+        lockedUntil: null,
+        lastError: null,
+      },
+    });
+  }
+
+  /**
    * Processa um schedule vencido já reivindicado pelo Scheduler (lease ativo).
    *
    * Fluxo (R1.5, R1.7, R1.8, R2.2–R2.6, R5.6, R7.1–R7.6, R9.2–R9.6):
@@ -167,6 +237,10 @@ export class FollowUpService {
 
     const level = schedule.pendingLevel as FollowUpLevel;
     const { conversationId, leadId } = schedule;
+    // Deriva o opt-out do estado do ciclo antes da reavaliação. Na prática o
+    // schedule aqui está sempre `active` (guarda acima), mas mantemos a
+    // derivação a partir do cycleState para coerência com o snapshot (R12.2).
+    const optedOut = (schedule.cycleState as string) === CYCLE_STATE.OPTED_OUT;
 
     // 1. Reavaliação no instante do disparo lendo o snapshot ATUAL (R2.3).
     let conversation: Awaited<
@@ -204,7 +278,9 @@ export class FollowUpService {
     }
 
     const lead = conversation.lead;
-    const result = this.eligibility.evaluate(this.toSnapshot(conversation, lead));
+    const result = this.eligibility.evaluate(
+      this.toSnapshot(conversation, lead, optedOut),
+    );
 
     // 2. Não elegível: suprime envio, marca cancelado e registra (R2.2/2.4, R4.3).
     if (!result.eligible) {
@@ -361,21 +437,9 @@ export class FollowUpService {
       return;
     }
 
-    const offsets = this.offsets();
-    await this.prisma.followUpSchedule.update({
-      where: { conversationId },
-      data: {
-        cycleState: CYCLE_STATE.ACTIVE,
-        inactivityAnchor: now,
-        maxSentLevel: 0,
-        pendingLevel: 1,
-        nextRunAt: nextRunForLevel(now, 1, offsets),
-        level3FiredAt: null,
-        deferredAttempts: 0,
-        lockedUntil: null,
-        lastError: null,
-      },
-    });
+    // R3.2 — reinicia o ciclo no Nível 1 a partir de now (lógica compartilhada
+    // com resumeFromOptOut — R12.4).
+    await this.restartCycleAtLevel1(conversationId, now);
   }
 
   /**
@@ -418,6 +482,119 @@ export class FollowUpService {
       reason: 'lead_perdido',
       occurredAt: now,
     });
+  }
+
+  /**
+   * Processa o opt-out definitivo de um turno (R12.1, R12.2, R12.5–R12.7).
+   *
+   * Cancela todos os níveis pendentes de forma atômica e idempotente e deixa a
+   * conversa SEMPRE no estado `opted_out` (mesmo sem nível pendente), sem
+   * reiniciar o ciclo. Registra EXATAMENTE um `followup_cancelled` com motivo
+   * `opt_out` apenas quando a transição para `opted_out` efetivamente ocorre
+   * nesta chamada — turnos repetidos de opt-out são no-op (R12.6).
+   *
+   * Em falha de persistência, preserva os pendentes, suprime novos envios e
+   * registra `followup_error` (R12.7).
+   */
+  async onOptOut(conversationId: string, now: Date): Promise<void> {
+    const schedule = await this.prisma.followUpSchedule.findUnique({
+      where: { conversationId },
+    });
+
+    // Resolve o leadId a partir do schedule ou da própria Conversation.
+    let leadId = schedule?.leadId ?? null;
+    if (leadId === null) {
+      const conversation = await this.prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { leadId: true },
+      });
+      leadId = conversation?.leadId ?? null;
+    }
+
+    if (leadId === null) {
+      // Sem lead identificável: nada a registrar.
+      return;
+    }
+
+    let transitioned = false;
+    try {
+      // R12.1 — cancela os níveis pendentes do ciclo ativo, marcando opted_out.
+      const cancelled = await this.prisma.followUpSchedule.updateMany({
+        where: {
+          conversationId,
+          cycleState: CYCLE_STATE.ACTIVE,
+          pendingLevel: { not: null },
+        },
+        data: {
+          pendingLevel: null,
+          cycleState: CYCLE_STATE.OPTED_OUT,
+          deferred: false,
+        },
+      });
+
+      // R12.2 — garante o estado opted_out de forma idempotente para qualquer
+      // outro estado (ativo sem pendente, cancelado, concluído). A guarda
+      // `cycleState != opted_out` impede transição/evento duplicado (R12.6).
+      const marked = await this.prisma.followUpSchedule.updateMany({
+        where: {
+          conversationId,
+          cycleState: { not: CYCLE_STATE.OPTED_OUT },
+        },
+        data: {
+          pendingLevel: null,
+          cycleState: CYCLE_STATE.OPTED_OUT,
+          deferred: false,
+        },
+      });
+
+      transitioned = cancelled.count > 0 || marked.count > 0;
+    } catch (err) {
+      // R12.7 — falha de persistência: preserva pendentes e registra erro.
+      this.logger.error(
+        `Falha ao processar opt-out (conversa ${conversationId}): ${this.errMsg(err)}`,
+      );
+      await this.recorder.record({
+        type: FOLLOW_UP_EVENT_TYPES.ERROR,
+        conversationId,
+        leadId,
+        occurredAt: now,
+      });
+      return;
+    }
+
+    if (!transitioned) {
+      // Já estava opted_out (ou inexistente): no-op idempotente, sem evento (R12.6).
+      return;
+    }
+
+    // R12.5 — exatamente um followup_cancelled com motivo opt_out.
+    await this.recorder.record({
+      type: FOLLOW_UP_EVENT_TYPES.CANCELLED,
+      conversationId,
+      leadId,
+      reason: 'opt_out',
+      occurredAt: now,
+    });
+  }
+
+  /**
+   * Reentrada após opt-out (R12.4): ao receber um turno posterior classificado
+   * como `interesse_normal` em uma conversa `opted_out`, remove o estado
+   * Opt_Out, redefine o `Inactivity_Anchor` para `now` e reinicia o ciclo a
+   * partir do Nível 1 — exatamente o caminho de reinício do `onInboundReceived`
+   * (R3). No-op quando a conversa não está em `opted_out`.
+   */
+  async resumeFromOptOut(conversationId: string, now: Date): Promise<void> {
+    const schedule = await this.prisma.followUpSchedule.findUnique({
+      where: { conversationId },
+    });
+
+    if (!schedule || schedule.cycleState !== CYCLE_STATE.OPTED_OUT) {
+      // Só reinicia a partir do estado Opt_Out (R12.4).
+      return;
+    }
+
+    await this.restartCycleAtLevel1(conversationId, now);
   }
 
   /**
@@ -533,7 +710,13 @@ export class FollowUpService {
    * prepara o encerramento quando o Nível 3 é disparado.
    */
   private async handleSent(
-    schedule: { id: string; conversationId: string; leadId: string; inactivityAnchor: Date },
+    schedule: {
+      id: string;
+      conversationId: string;
+      leadId: string;
+      inactivityAnchor: Date;
+      deferred: boolean;
+    },
     level: FollowUpLevel,
     sentAt: Date,
   ): Promise<void> {
@@ -569,13 +752,20 @@ export class FollowUpService {
       return;
     }
 
-    // Níveis 1 e 2: agenda o próximo nível a partir do anchor (R1.3, R1.4).
+    // Níveis 1 e 2: agenda o próximo nível (R1.3, R1.4).
     const next = nextPendingLevel(level);
     if (next === null) {
       return;
     }
 
-    const nextRunAt = nextRunForLevel(schedule.inactivityAnchor, next, this.offsets());
+    // R11.5 — quando o disparo cumprido é o Deferred_Followup (deferred && Nível
+    // 1), a cadência normal é retomada a partir do INSTANTE do disparo
+    // (`sentAt`), e não do `inactivityAnchor` original: Nível 2 = sentAt + 24h e,
+    // na sequência, Nível 3 = sentAt + 48h. Para o caso não-adiado mantém-se o
+    // `inactivityAnchor`. O flag `deferred` é desativado ao agendar o próximo.
+    const anchorForNext =
+      schedule.deferred && level === 1 ? sentAt : schedule.inactivityAnchor;
+    const nextRunAt = nextRunForLevel(anchorForNext, next, this.offsets());
     const persisted = await this.persistScheduleNext(schedule.id, next, nextRunAt);
 
     if (!persisted) {
@@ -606,7 +796,7 @@ export class FollowUpService {
       try {
         await this.prisma.followUpSchedule.update({
           where: { id: scheduleId },
-          data: { pendingLevel: next, nextRunAt, deferredAttempts: 0 },
+          data: { pendingLevel: next, nextRunAt, deferredAttempts: 0, deferred: false },
         });
         return true;
       } catch (err) {
@@ -626,7 +816,14 @@ export class FollowUpService {
     });
   }
 
-  /** Constrói o {@link ConversationSnapshot} a partir dos dados atuais. */
+  /**
+   * Constrói o {@link ConversationSnapshot} a partir dos dados atuais.
+   *
+   * `optedOut` é derivado do `cycleState` do schedule (R12.2): o chamador que
+   * já carregou o schedule (p.ex. {@link processDue}) repassa
+   * `scheduleCycleState === 'opted_out'`. Quando o estado do ciclo não está
+   * disponível, assume-se `false` (sem opt-out persistido).
+   */
   private toSnapshot(
     conversation: {
       stage: string;
@@ -638,6 +835,7 @@ export class FollowUpService {
       handoffRequired: boolean;
     },
     lead: { status: string },
+    optedOut = false,
   ): ConversationSnapshot {
     return {
       leadStatus: lead.status,
@@ -648,6 +846,8 @@ export class FollowUpService {
       handoffAccepted: conversation.handoffAccepted,
       handoffCompleted: conversation.handoffCompleted,
       handoffRequired: conversation.handoffRequired,
+      // R12.2 — derivado do estado do ciclo (cycleState === 'opted_out').
+      optedOut,
     };
   }
 
@@ -658,6 +858,57 @@ export class FollowUpService {
       this.config.followUpLevel2Hours,
       this.config.followUpLevel3Hours,
     ];
+  }
+
+  /**
+   * Resolve o `Deferral_Offset` efetivo do follow-up adiado (R11.2–R11.4).
+   *
+   * A decisão default-vs-inferido já chega resolvida do chamador; aqui
+   * garantimos o **fallback** para `FOLLOWUP_DEFAULT_DEFERRAL_HOURS` (5h) quando
+   * o valor é inválido (`NaN`, não finito ou `<= 0`) e o **piso** de
+   * `FOLLOWUP_MIN_DEFERRAL_HOURS` (1h). Não há teto.
+   */
+  private resolveDeferralOffset(offsetHours: number): number {
+    const fallback = this.config.followUpDefaultDeferralHours;
+    const floor = this.config.followUpMinDeferralHours;
+
+    const candidate =
+      typeof offsetHours === 'number' &&
+      Number.isFinite(offsetHours) &&
+      offsetHours > 0
+        ? offsetHours
+        : fallback;
+
+    return Math.max(candidate, floor);
+  }
+
+  /**
+   * Reinicia o ciclo de follow-up no Nível 1 a partir de `now` (R3.2, R12.4):
+   * redefine o `Inactivity_Anchor` para `now`, zera o nível enviado, agenda o
+   * Nível 1 (`now + 1h`), desativa o flag `deferred` e limpa o estado de borda.
+   * É a lógica de reinício compartilhada por {@link onInboundReceived} e
+   * {@link resumeFromOptOut}.
+   */
+  private async restartCycleAtLevel1(
+    conversationId: string,
+    now: Date,
+  ): Promise<void> {
+    const offsets = this.offsets();
+    await this.prisma.followUpSchedule.update({
+      where: { conversationId },
+      data: {
+        cycleState: CYCLE_STATE.ACTIVE,
+        inactivityAnchor: now,
+        maxSentLevel: 0,
+        pendingLevel: 1,
+        deferred: false,
+        nextRunAt: nextRunForLevel(now, 1, offsets),
+        level3FiredAt: null,
+        deferredAttempts: 0,
+        lockedUntil: null,
+        lastError: null,
+      },
+    });
   }
 
   /** Backoff mínimo (ms) ao reagendar por rate-limit, com piso de 60s (R9.3). */

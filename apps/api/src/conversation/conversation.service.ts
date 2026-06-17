@@ -9,6 +9,9 @@ import { HandoffManagerService } from '../agent/handoff-manager';
 import { ResponseGuardService, GuardInput } from '../agent/response-guard.service';
 import { PricingConfigService } from '../inbound/pricing-config.service';
 import { FollowUpService } from '../followup/followup.service';
+import { EngagementClassifierService } from '../followup/engagement-classifier.service';
+import { EngagementClassification } from '../followup/followup.types';
+import { AppConfigService } from '../config/config.service';
 import { resolveCommand, availableCommandsReply } from '../agent/command-handler';
 import { classifyEdgeInput, edgeReply } from '../agent/edge-input';
 import { resolveIntent } from '../agent/intent-resolver';
@@ -63,6 +66,16 @@ const REPLY_FRUSTRATION =
 
 const REPLY_ACKNOWLEDGMENT = 'Tô por aqui se precisar.';
 
+// ─── Engagement (R10–R13): desfechos determinísticos de desengajamento ──────
+// Respostas canônicas do turno quando o lead pede para PARAR (opt_out) ou para
+// ser contatado MAIS TARDE (nao_agora). Nenhuma delas escala para humano.
+
+const REPLY_OPT_OUT_CONFIRM =
+  'Tudo bem, não te envio mais mensagens. Se mudar de ideia, é só me chamar.';
+
+const REPLY_DEFERRAL_ACK =
+  'Fechado! Te dou um toque mais pra frente então. Quando quiser, é só me chamar.';
+
 @Injectable()
 export class ConversationService {
   private readonly logger = new Logger(ConversationService.name);
@@ -87,6 +100,8 @@ export class ConversationService {
     private readonly pricingConfig: PricingConfigService,
     private readonly knowledge: KnowledgeService,
     private readonly followUpService: FollowUpService,
+    private readonly engagementClassifier: EngagementClassifierService,
+    private readonly config: AppConfigService,
   ) {}
 
   /**
@@ -292,6 +307,51 @@ export class ConversationService {
       (!!facts.mainPain || facts.knownPains.length > 0) &&
       painDeepened &&
       !!facts.volume;
+
+    // 7b. Engagement classification (R10, R13) — resolved BEFORE response
+    //     generation and BEFORE the handoff decision, so it has PRECEDENCE over
+    //     the path that today escalates to a human. A polite deferral like
+    //     "não, eu volto a te acionar quando eu quiser" must NOT be read as a
+    //     human request/accept (the "quando" bug). The classifier only runs
+    //     when a cheap, deterministic gate says it is worth it; otherwise the
+    //     safe default `interesse_normal` is assumed WITHOUT an LLM call (R13.5).
+    const engagement = await this.resolveEngagementIntent({
+      conversationId,
+      history,
+      leadMessage: rawContent,
+      handoffState,
+      qualificationReadyForOffer,
+    });
+
+    // Early branch (R11.6, R12.3, R13.1, R13.2): a disengagement turn never
+    // reaches the handoff path nor marks finalHandoff. It produces a
+    // deterministic reply and delegates the scheduling side effect to the
+    // FollowUpService, short-circuiting steps 8/9 entirely.
+    if (
+      engagement.classification.intent === 'nao_agora' ||
+      engagement.classification.intent === 'opt_out'
+    ) {
+      return this.finishDisengagementTurn(
+        conversationId,
+        conversation,
+        facts,
+        engagement.classification,
+      );
+    }
+
+    // interesse_normal: re-enter the cycle if the conversation was opted-out
+    // (R12.4). resumeFromOptOut is a no-op when there is no opted-out schedule,
+    // so this only fires when relevant. Resilient: never breaks the turn.
+    if (engagement.optedOut) {
+      void this.followUpService
+        .resumeFromOptOut(conversationId, new Date())
+        .catch((err) =>
+          this.logger.error(
+            `[${conversationId}] Follow-up resumeFromOptOut hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
+          ),
+        );
+    }
+
     const handoffDecision = this.handoffManager.resolve({
       current: handoffState,
       preference,
@@ -580,6 +640,271 @@ export class ConversationService {
     };
 
     return { message: assistantMessage, qualification };
+  }
+
+  /**
+   * Resolves the Engagement_Intent for this turn (R10, R13).
+   *
+   * Runs a cheap, deterministic GATE first and only calls the LLM classifier
+   * when it is worth it. The gate is NOT a classifier — it only decides whether
+   * to spend an LLM call; the final class is always the LLM's (R10.3). The gate
+   * fires when ANY of these hold:
+   *   - there is a pending/active follow-up cycle for the conversation
+   *     (`cycleState ∈ {active, opted_out}`) — where deferral/opt-out change
+   *     the schedule;
+   *   - the bot's previous turn was a handoff offer/list request
+   *     (`handoffState === 'suggested'`) — where "quando/adiamento × aceite"
+   *     confusion happens;
+   *   - the lead is already qualified (`qualificationReadyForOffer`);
+   *   - the message looks like a negation combined with a temporal
+   *     reference/refusal (light lexical gate).
+   *
+   * Otherwise the safe class `interesse_normal` is returned WITHOUT an LLM call
+   * (R13.5) — this never produces a disengagement signal, so it never escalates.
+   * Any gate read failure or classifier error also degrades to the safe class.
+   */
+  private async resolveEngagementIntent(params: {
+    conversationId: string;
+    history: ConversationMessage[];
+    leadMessage: string;
+    handoffState: string;
+    qualificationReadyForOffer: boolean;
+  }): Promise<{ classification: EngagementClassification; optedOut: boolean }> {
+    const {
+      conversationId,
+      history,
+      leadMessage,
+      handoffState,
+      qualificationReadyForOffer,
+    } = params;
+
+    // Cheap gate input: the follow-up cycle state (read once, resiliently).
+    let cycleState: string | null = null;
+    try {
+      const schedule = await this.prisma.followUpSchedule.findUnique({
+        where: { conversationId },
+        select: { cycleState: true },
+      });
+      cycleState = schedule?.cycleState ?? null;
+    } catch (err) {
+      // A gate read failure must never break the turn (R13.5): assume no cycle.
+      cycleState = null;
+    }
+
+    const optedOut = cycleState === 'opted_out';
+    const hasActiveOrOptedCycle =
+      cycleState === 'active' || cycleState === 'opted_out';
+
+    const shouldClassify =
+      hasActiveOrOptedCycle ||
+      handoffState === 'suggested' ||
+      qualificationReadyForOffer ||
+      this.looksLikeDeferralOrRefusal(leadMessage);
+
+    if (!shouldClassify) {
+      // Safe default class without an LLM call (R13.5): never escalates.
+      return {
+        classification: { intent: 'interesse_normal', confidence: 0, failSafe: true },
+        optedOut,
+      };
+    }
+
+    const lastBotMessage = this.lastAssistantMessage(history);
+    try {
+      const classification = await this.engagementClassifier.classify({
+        lastBotMessage,
+        leadMessage,
+      });
+      return { classification, optedOut };
+    } catch (err) {
+      // The classifier already fail-safes internally; stay defensive (R13.5).
+      this.logger.warn(
+        `[${conversationId}] Engagement classifier threw, assuming interesse_normal: ${err instanceof Error ? err.message : 'Unknown'}`,
+      );
+      return {
+        classification: { intent: 'interesse_normal', confidence: 0, failSafe: true },
+        optedOut,
+      };
+    }
+  }
+
+  /** Last assistant (bot) message in the history — the question the lead replied to. */
+  private lastAssistantMessage(history: ConversationMessage[]): string | null {
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].role === 'assistant') {
+        return history[i].content;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Cheap, deterministic GATE (not a classifier): true when the message has a
+   * negation combined with a temporal reference or an explicit refusal. Used
+   * only to decide whether to spend an LLM call; the actual class is always the
+   * LLM's (R10.3). Designed to be permissive (catch borderline phrasings) while
+   * remaining trivially cheap.
+   */
+  private looksLikeDeferralOrRefusal(message: string): boolean {
+    const text = (message ?? '').toLowerCase();
+    if (text.trim() === '') return false;
+
+    const negation =
+      /(\bn[ãa]o\b|\bnunca\b|\bsem\b|\bchega\b|\bpar[ae]\b|\bnem\b)/.test(text);
+    const temporalOrRefusal =
+      /(depois|mais tarde|amanh[ãa]|semana|m[êe]s|outro dia|outra hora|quando|agora n[ãa]o|me chama|te chamo|te aciono|volto|retorno|acionar|cancel|descadastr|sair da lista|para de me|parar de me|n[ãa]o quero|n[ãa]o me mand|n[ãa]o me envi)/.test(
+        text,
+      );
+
+    return negation && temporalOrRefusal;
+  }
+
+  /**
+   * Finalizes a DISENGAGEMENT turn (R11, R12, R13) without ever escalating to a
+   * human. Produces the deterministic acknowledgment (deferral) or opt-out
+   * confirmation, persists the assistant message, updates the lead WITHOUT
+   * forcing `chamar_humano` (keeps the current status / `qualificando`), and
+   * delegates the scheduling side effect (`scheduleDeferred`/`onOptOut`) to the
+   * FollowUpService resiliently (a follow-up failure never breaks the turn).
+   *
+   * Stage stays neutral (the conversation's current stage); `finalHandoff` is
+   * never set and the conversation handoff state is never updated.
+   */
+  private async finishDisengagementTurn(
+    conversationId: string,
+    conversation: { stage: string; leadId: string; lead?: any },
+    facts: ConversationContext['facts'],
+    engagement: EngagementClassification,
+  ) {
+    const leadData = (conversation.lead || {}) as any;
+    const now = new Date();
+    const stage = conversation.stage || 'descoberta';
+
+    let finalReply: string;
+
+    if (engagement.intent === 'opt_out') {
+      finalReply = REPLY_OPT_OUT_CONFIRM;
+      void this.followUpService
+        .onOptOut(conversationId, now)
+        .catch((err) =>
+          this.logger.error(
+            `[${conversationId}] Follow-up onOptOut hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
+          ),
+        );
+    } else {
+      // nao_agora: resolve the deferral offset (inferred → default 5h).
+      const offsetHours =
+        engagement.deferral?.durationHours ??
+        this.config.followUpDefaultDeferralHours;
+      finalReply = this.buildDeferralReply(engagement.deferral?.durationHours);
+      void this.followUpService
+        .scheduleDeferred(conversationId, offsetHours, now)
+        .catch((err) =>
+          this.logger.error(
+            `[${conversationId}] Follow-up scheduleDeferred hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
+          ),
+        );
+    }
+
+    this.logger.log(
+      `[${conversationId}] Disengagement turn | engagement=${engagement.intent} | failSafe=${engagement.failSafe} | NO handoff`,
+    );
+
+    // Persist the deterministic assistant reply.
+    const assistantMessage = await this.prisma.message.create({
+      data: {
+        conversationId,
+        role: 'assistant',
+        direction: 'outbound',
+        content: finalReply,
+      },
+    });
+
+    // Persist newly established facts + a non-decreasing score. Status is kept
+    // as-is (never `chamar_humano`; opt-out/deferral are not a lost lead): the
+    // current status is preserved, defaulting to `qualificando` when unset.
+    const previousScore = leadData.leadScore || 0;
+    const baseScore = calculateScore(facts);
+    const finalScore = clampNonDecreasing(previousScore, baseScore.score);
+    const finalTemperature = temperatureFor(finalScore);
+    const finalStatus =
+      leadData.status === 'chamar_humano'
+        ? leadData.status
+        : leadData.status || 'qualificando';
+
+    try {
+      const leadUpdate: Record<string, unknown> = {
+        leadScore: finalScore,
+        temperature: finalTemperature,
+        status: finalStatus,
+      };
+      if (facts.segment && !leadData.segment) leadUpdate.segment = facts.segment;
+      if (facts.mainPain && !leadData.mainPain) leadUpdate.mainPain = facts.mainPain;
+      if (facts.whatsappUsage && !leadData.whatsappUsage)
+        leadUpdate.whatsappUsage = facts.whatsappUsage;
+      if (facts.volume && !leadData.estimatedVolume)
+        leadUpdate.estimatedVolume = facts.volume;
+      if (facts.decisionRole && !leadData.decisionRole)
+        leadUpdate.decisionRole = facts.decisionRole;
+
+      await this.prisma.lead.update({
+        where: { id: conversation.leadId },
+        data: leadUpdate,
+      });
+    } catch (err) {
+      this.logger.error(
+        `[${conversationId}] Failed to update lead (disengagement): ${err instanceof Error ? err.message : 'Unknown'}`,
+      );
+    }
+
+    const qualification = {
+      stage: stage as any,
+      detectedSegment: facts.segment,
+      detectedIntent: 'outro' as any,
+      mainPain: facts.mainPain,
+      recommendedService: leadData.recommendedService ?? null,
+      leadScore: finalScore,
+      temperature: finalTemperature as any,
+      status: finalStatus as any,
+      shouldHandoff: false,
+      handoffReason: null,
+      commercialSummary: null,
+      nextBestQuestion: null,
+      scoreReasons: baseScore.reasons,
+      objections: [] as string[],
+      urgency: 'desconhecida' as const,
+      estimatedVolume: 'desconhecido' as const,
+      decisionRole: 'desconhecido' as const,
+      budgetSignal: 'desconhecido' as const,
+    };
+
+    return { message: assistantMessage, qualification };
+  }
+
+  /**
+   * Deterministic deferral acknowledgment (R11.6). When the lead indicated a
+   * timeframe, mention it naturally; otherwise use the generic acknowledgment.
+   */
+  private buildDeferralReply(durationHours?: number): string {
+    if (typeof durationHours === 'number' && durationHours > 0) {
+      const when = this.formatDeferralWindow(durationHours);
+      if (when) {
+        return `Fechado! Te dou um toque ${when} então. Quando quiser, é só me chamar.`;
+      }
+    }
+    return REPLY_DEFERRAL_ACK;
+  }
+
+  /** Turns a deferral offset in hours into a natural Portuguese phrase. */
+  private formatDeferralWindow(hours: number): string | null {
+    if (!Number.isFinite(hours) || hours <= 0) return null;
+    if (hours < 24) {
+      const rounded = Math.max(1, Math.round(hours));
+      return rounded === 1 ? 'daqui a pouco' : `daqui a ${rounded} horas`;
+    }
+    const days = Math.round(hours / 24);
+    if (days <= 1) return 'amanhã';
+    return `daqui a ${days} dias`;
   }
 
   /**
