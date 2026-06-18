@@ -83,8 +83,35 @@ export class FollowUpService {
    * {@link computeInactivityAnchor}. Quando o anchor é `null` (o lead já
    * respondeu após o último outbound do bot) NÃO agenda. Caso contrário, faz
    * upsert da linha em `follow_up_schedules` reiniciando o ciclo no Nível 1.
+   *
+   * **Defensivo (correção do bug de produção)**: este hook roda após QUALQUER
+   * outbound do bot, inclusive a confirmação de opt-out e o reconhecimento de
+   * adiamento. Por isso, antes de (re)agendar, lê o schedule existente e
+   * respeita estados que NÃO devem ser sobrescritos por um Nível 1 de 1h:
+   *  - `cycleState === 'opted_out'` → NÃO agenda (respeita o opt-out; nunca
+   *    ressuscita o ciclo — alinhado ao R12.2). A reentrada legítima ocorre
+   *    apenas via {@link resumeFromOptOut} em um turno de interesse_normal.
+   *  - `cycleState === 'active' && deferred === true` → NÃO agenda (preserva o
+   *    Deferred_Followup; não sobrescreve a cadência adiada — R11).
    */
   async ensureScheduled(conversationId: string): Promise<void> {
+    // Lê o schedule existente para respeitar estados protegidos (opt-out /
+    // deferred) antes de qualquer (re)agendamento (correção do bug).
+    const existing = await this.prisma.followUpSchedule.findUnique({
+      where: { conversationId },
+    });
+
+    if (existing) {
+      if (existing.cycleState === CYCLE_STATE.OPTED_OUT) {
+        // Respeita o opt-out: nunca ressuscita o ciclo (R12.2).
+        return;
+      }
+      if (existing.cycleState === CYCLE_STATE.ACTIVE && existing.deferred) {
+        // Preserva o Deferred_Followup: não sobrescreve por um Nível 1 (R11).
+        return;
+      }
+    }
+
     const conversation = await this.prisma.conversation.findUnique({
       where: { id: conversationId },
     });

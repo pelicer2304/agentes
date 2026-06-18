@@ -784,26 +784,34 @@ export class ConversationService {
 
     if (engagement.intent === 'opt_out') {
       finalReply = REPLY_OPT_OUT_CONFIRM;
-      void this.followUpService
-        .onOptOut(conversationId, now)
-        .catch((err) =>
-          this.logger.error(
-            `[${conversationId}] Follow-up onOptOut hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
-          ),
+      // AGUARDA a persistência do estado `opted_out` ANTES de retornar, para
+      // que o hook de outbound (notifyFollowUpOutbound → ensureScheduled) do
+      // InboundMessageProcessor, que roda em seguida, encontre o ciclo já em
+      // opted_out e NÃO o ressuscite (correção do bug). O try/catch garante que
+      // uma falha de follow-up nunca quebre a resposta determinística ao lead.
+      try {
+        await this.followUpService.onOptOut(conversationId, now);
+      } catch (err) {
+        this.logger.error(
+          `[${conversationId}] Follow-up onOptOut hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
         );
+      }
     } else {
       // nao_agora: resolve the deferral offset (inferred → default 5h).
       const offsetHours =
         engagement.deferral?.durationHours ??
         this.config.followUpDefaultDeferralHours;
       finalReply = this.buildDeferralReply(engagement.deferral?.durationHours);
-      void this.followUpService
-        .scheduleDeferred(conversationId, offsetHours, now)
-        .catch((err) =>
-          this.logger.error(
-            `[${conversationId}] Follow-up scheduleDeferred hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
-          ),
+      // AGUARDA a persistência do estado `deferred` ANTES de retornar, pelo
+      // mesmo motivo do opt-out: evita a corrida com o ensureScheduled que roda
+      // logo após o outbound e sobrescreveria o adiamento por um Nível 1 de 1h.
+      try {
+        await this.followUpService.scheduleDeferred(conversationId, offsetHours, now);
+      } catch (err) {
+        this.logger.error(
+          `[${conversationId}] Follow-up scheduleDeferred hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
         );
+      }
     }
 
     this.logger.log(
