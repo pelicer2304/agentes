@@ -426,9 +426,14 @@ export class FollowUpService {
       !schedule ||
       schedule.cycleState !== CYCLE_STATE.ACTIVE ||
       schedule.pendingLevel === null ||
-      schedule.pendingLevel === undefined
+      schedule.pendingLevel === undefined ||
+      schedule.deferred
     ) {
-      // R3.4 — sem nível pendente: no-op (sem evento, sem alteração).
+      // R3.4 — sem nível pendente: no-op. Também NÃO cancela um Deferred_Followup
+      // (adiamento "me chama daqui X"): no caminho do debounce este hook roda
+      // DEPOIS do scheduleDeferred, então cancelar aqui sobrescreveria o adiamento
+      // por um Nível 1 de 1h — era exatamente o que impedia os adiamentos de
+      // disparar. O adiamento já é a resposta tratada do turno; preserva.
       return;
     }
 
