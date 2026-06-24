@@ -63,11 +63,24 @@ export class HealthService {
       },
       select: { conversationId: true, nextRunAt: true, pendingLevel: true },
     });
+    // Últimos eventos de follow-up (sent/cancelled/error) com o motivo no payload.
+    const events = await this.prisma.botEvent.findMany({
+      where: { type: { startsWith: 'followup_' } },
+      orderBy: { createdAt: 'desc' },
+      take: 8,
+      select: {
+        type: true,
+        payload: true,
+        conversationId: true,
+        createdAt: true,
+      },
+    });
     return {
       now: now.toISOString(),
       dueCountViaPrisma: due.length,
       due,
       recentSchedules,
+      recentEvents: events,
     };
   }
 
