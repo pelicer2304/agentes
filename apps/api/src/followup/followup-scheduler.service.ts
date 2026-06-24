@@ -76,8 +76,16 @@ export class FollowUpSchedulerService implements OnModuleInit, OnModuleDestroy {
   /** Handle do `setInterval` ativo (null quando o agendamento não está ligado). */
   private timer: NodeJS.Timeout | null = null;
 
-  /** Guarda de reentrância: evita ticks sobrepostos se um poll demorar. */
-  private running = false;
+  /**
+   * Guarda de reentrância (timestamp do início do tick em andamento, ou null).
+   * Resiliente: se um tick travar (ex.: chamada de rede pendurada), a guarda se
+   * libera após STALE_MS e o poll volta a rodar — sem isso, um único tick
+   * travado mataria o scheduler em silêncio para sempre.
+   */
+  private runningSince: number | null = null;
+
+  /** Após este tempo, um tick "em andamento" é considerado travado e liberado. */
+  private static readonly STALE_TICK_MS = 3 * 60 * 1000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -116,17 +124,27 @@ export class FollowUpSchedulerService implements OnModuleInit, OnModuleDestroy {
    * ticks sobrepostos.
    */
   private async runTickGuarded(): Promise<void> {
-    if (this.running) {
-      // Um tick anterior ainda está em andamento: pula este ciclo.
+    const nowMs = Date.now();
+    if (
+      this.runningSince !== null &&
+      nowMs - this.runningSince < FollowUpSchedulerService.STALE_TICK_MS
+    ) {
+      // Um tick anterior ainda está em andamento (e não travado): pula o ciclo.
       return;
     }
-    this.running = true;
+    if (this.runningSince !== null) {
+      // O tick anterior excedeu o limite: provavelmente travado. Libera e segue.
+      this.logger.warn(
+        `Tick anterior do follow-up travado por >${FollowUpSchedulerService.STALE_TICK_MS}ms; liberando a guarda e seguindo.`,
+      );
+    }
+    this.runningSince = nowMs;
     try {
       await this.tick();
     } catch (err) {
       this.logger.error(`Falha inesperada no tick do follow-up: ${this.errMsg(err)}`);
     } finally {
-      this.running = false;
+      this.runningSince = null;
     }
   }
 
@@ -151,10 +169,19 @@ export class FollowUpSchedulerService implements OnModuleInit, OnModuleDestroy {
   private async processDueSchedules(now: Date): Promise<void> {
     const claimed = await this.claimDueSchedules(now);
 
-    if (claimed.length > 0) {
-      this.logger.log(
-        `Follow-up tick: ${claimed.length} schedule(s) vencido(s) reivindicado(s) para disparo.`,
-      );
+    // Heartbeat: só loga quando há ciclo ativo (evita ruído quando não há nada).
+    // Confirma que o tick está VIVO e o que ele enxerga (active vs reivindicado).
+    try {
+      const activeCount = await this.prisma.followUpSchedule.count({
+        where: { cycleState: 'active' },
+      });
+      if (activeCount > 0 || claimed.length > 0) {
+        this.logger.log(
+          `FOLLOWUP_TICK active=${activeCount} claimed=${claimed.length} @ ${now.toISOString()}`,
+        );
+      }
+    } catch {
+      // contagem é só diagnóstico; nunca quebra o tick.
     }
 
     for (const { id } of claimed) {
