@@ -64,6 +64,12 @@ const REPLY_DESISTANCE =
 const REPLY_FRUSTRATION =
   'Entendi. Vou te encaminhar direto pro time resolver isso com você, sem mais pergunta.';
 
+// Número do time de PLANOS do decodificador de etiquetas (ZPL -> PDF), que é um
+// produto diferente do agente de IA. Trocar aqui se mudar.
+const LABEL_DECODER_PHONE = '+55 11 93318-3820';
+const REPLY_REDIRECT_LABELS =
+  `Ah, saquei! O decodificador de etiquetas (ZPL pra PDF) é com outro time da Decodifica — aqui é o agente de IA de atendimento. Pra fazer ou renovar sua assinatura, chama nesse número: ${LABEL_DECODER_PHONE}, que eles te resolvem rapidinho.`;
+
 const REPLY_ACKNOWLEDGMENT = 'Tô por aqui se precisar.';
 
 // ─── Engagement (R10–R13): desfechos determinísticos de desengajamento ──────
@@ -245,6 +251,25 @@ export class ConversationService {
       where: { conversationId },
       orderBy: { createdAt: 'asc' },
     });
+
+    // 5b. Roteamento de produto: quem quer ASSINAR/renovar/usar o decodificador
+    //     de etiquetas (ZPL -> PDF) caiu no número errado — esse é outro produto
+    //     da Decodifica. Manda chamar o time de planos no número certo, em vez de
+    //     tentar qualificar como lead de atendimento. Só uma vez (não repete).
+    const userTexts = messages
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content)
+      .join(' \n ');
+    const alreadyRedirected = messages.some(
+      (m) => m.role === 'assistant' && m.content.includes(LABEL_DECODER_PHONE),
+    );
+    if (!alreadyRedirected && this.wantsLabelDecoderPlan(userTexts)) {
+      return this.finishCannedTurn(
+        conversationId,
+        REPLY_REDIRECT_LABELS,
+        conversation,
+      );
+    }
     const history: ConversationMessage[] = messages.map((msg) => ({
       role: msg.role as 'user' | 'assistant' | 'system',
       content: msg.content,
@@ -919,6 +944,28 @@ export class ConversationService {
     const days = Math.round(hours / 24);
     if (days <= 1) return 'amanhã';
     return `daqui a ${days} dias`;
+  }
+
+  /**
+   * Detecta que a pessoa quer ASSINAR/renovar/usar o decodificador de etiquetas
+   * (ZPL -> PDF) — produto distinto do agente de IA. Exige DOIS sinais juntos no
+   * histórico: o domínio de etiqueta/ZPL E a intenção de assinar/converter. Isso
+   * evita confundir com um lead que TEM um negócio de etiquetas e quer automação
+   * de atendimento (esse menciona ZPL mas sem querer "assinar/converter").
+   */
+  private wantsLabelDecoderPlan(text: string): boolean {
+    const t = text.toLowerCase();
+    const labelDomain =
+      /\bzpl\b/.test(t) ||
+      /decodific\w*\s+(de\s+)?(etiqueta|zpl)/.test(t) ||
+      /(etiqueta|zpl)[^.]{0,30}\bpdf\b/.test(t) ||
+      /\bpdf\b[^.]{0,30}(zpl|etiqueta)/.test(t);
+    const buyIntent =
+      /\bassinar\b|\bassinatura\b|\brenovar\b|\bmensalidade\b/.test(t) ||
+      /(preciso|quero|gostaria|fazer|como\s+fa[çc]o)\s+(de\s+)?(uma\s+)?(assinatura|plano|converter|decodificar)/.test(
+        t,
+      );
+    return labelDomain && buyIntent;
   }
 
   /**
