@@ -196,6 +196,9 @@ export class FollowUpService {
 
     const offset = this.resolveDeferralOffset(offsetHours);
     const nextRunAt = new Date(now.getTime() + offset * 60 * 60 * 1000);
+    this.logger.log(
+      `[${conversationId}] scheduleDeferred: offsetHours(pedido)=${offsetHours} -> offset=${offset}h (~${Math.round(offset * 60)}min), nextRunAt=${nextRunAt.toISOString()}`,
+    );
 
     await this.prisma.followUpSchedule.upsert({
       where: { conversationId },
