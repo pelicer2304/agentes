@@ -992,6 +992,7 @@ export class ConversationService {
   private looksLikeSubscriptionOrAccount(text: string): boolean {
     const t = text.toLowerCase();
     return (
+      // conta / senha / plano / assinatura
       /(alterar|trocar|mudar|recuperar|esqueci|redefinir)\s+(a\s+)?(minha\s+)?senha/.test(
         t,
       ) ||
@@ -999,8 +1000,16 @@ export class ConversationService {
         t,
       ) ||
       /\b(minha\s+assinatura|minha\s+conta|meu\s+login)\b/.test(t) ||
-      /(fazer|n[ãa]o\s+consigo)\s+(o\s+)?(login|logar|entrar|acessar)/.test(t) ||
-      /(plano|assinatura)\s+(venceu|expirou|vencid|expirad)/.test(t)
+      /(plano|assinatura)\s+(venceu|expirou|vencid|expirad)/.test(t) ||
+      // acesso / login / plataforma — o agente de IA não é uma plataforma com
+      // login; quem fala de "não loga / não acessa / a plataforma" quase sempre
+      // quer outro produto (ex.: o decodificador), então perguntamos.
+      /\b(logar|logando|login)\b/.test(t) ||
+      /n[ãa]o\s.{0,25}(entrar|acessar|logar|logando)\b/.test(t) ||
+      (/\bplataforma\b/.test(t) &&
+        /(n[ãa]o|problema|dificuldade|erro|logar|login|acessar|entrar|senha|conta)/.test(
+          t,
+        ))
     );
   }
 
