@@ -214,14 +214,14 @@ export class FollowUpSchedulerService implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.prisma.$queryRaw<ClaimedScheduleRow[]>`
         UPDATE "follow_up_schedules"
-        SET "locked_until" = ${lockedUntil}
+        SET "locked_until" = ${lockedUntil}::timestamptz AT TIME ZONE 'UTC'
         WHERE "id" IN (
           SELECT "id"
           FROM "follow_up_schedules"
           WHERE "cycle_state" = 'active'
             AND "next_run_at" IS NOT NULL
-            AND "next_run_at" <= ${now}
-            AND ("locked_until" IS NULL OR "locked_until" <= ${now})
+            AND "next_run_at" <= ${now}::timestamptz AT TIME ZONE 'UTC'
+            AND ("locked_until" IS NULL OR "locked_until" <= ${now}::timestamptz AT TIME ZONE 'UTC')
           ORDER BY "next_run_at" ASC
           FOR UPDATE SKIP LOCKED
           LIMIT ${CLAIM_BATCH_SIZE}
