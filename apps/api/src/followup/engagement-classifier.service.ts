@@ -80,8 +80,10 @@ export class EngagementClassifierService {
       '"os clientes não me chamam, eu que chamo eles").\n' +
       'Se houver dúvida ou empate, use interesse_normal com confidence baixa. ' +
       'confidence é um número entre 0 e 1. ' +
-      'Se (e somente se) o lead indicar um prazo ("amanhã de manhã", "semana ' +
-      'que vem"), estime deferral.durationHours (inteiro de horas).';
+      'Se (e somente se) o lead indicar um prazo, estime deferral.durationHours ' +
+      'em HORAS, podendo ser fracionário para prazos curtos. Exemplos: ' +
+      '"5 minutos" = 0.08, "meia hora" = 0.5, "daqui a pouco" = 2, "mais tarde" ' +
+      '= 4, "amanhã" = 24, "semana que vem" = 168.';
 
     const lastBot = ctx.lastBotMessage ?? '(sem pergunta anterior)';
     const user = `PERGUNTA DO BOT: ${lastBot}\nRESPOSTA DO LEAD: ${ctx.leadMessage}`;
@@ -190,8 +192,9 @@ export class EngagementClassifierService {
   }
 
   /**
-   * Extrai deferral.durationHours quando presente e positivo; arredonda para
-   * inteiro de horas. Retorna null quando ausente/inválido.
+   * Extrai deferral.durationHours quando presente e positivo. Preserva frações
+   * de hora (2 casas) para suportar prazos curtos em minutos (ex.: "5 minutos"
+   * = 0.08h). Retorna null quando ausente/inválido.
    */
   private coerceDurationHours(deferral: unknown): number | null {
     if (deferral === null || typeof deferral !== 'object') {
@@ -201,7 +204,7 @@ export class EngagementClassifierService {
     if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
       return null;
     }
-    return Math.round(raw);
+    return Math.round(raw * 100) / 100;
   }
 
   /** Classe segura padrão de qualquer fallback (R10.6, R10.9). */

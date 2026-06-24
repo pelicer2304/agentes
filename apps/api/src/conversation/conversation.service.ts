@@ -953,9 +953,13 @@ export class ConversationService {
   /** Turns a deferral offset in hours into a natural Portuguese phrase. */
   private formatDeferralWindow(hours: number): string | null {
     if (!Number.isFinite(hours) || hours <= 0) return null;
+    if (hours < 1) {
+      const minutes = Math.max(1, Math.round(hours * 60));
+      return minutes <= 1 ? 'já já' : `daqui a ${minutes} minutos`;
+    }
     if (hours < 24) {
-      const rounded = Math.max(1, Math.round(hours));
-      return rounded === 1 ? 'daqui a pouco' : `daqui a ${rounded} horas`;
+      const rounded = Math.round(hours);
+      return rounded <= 1 ? 'daqui a pouco' : `daqui a ${rounded} horas`;
     }
     const days = Math.round(hours / 24);
     if (days <= 1) return 'amanhã';

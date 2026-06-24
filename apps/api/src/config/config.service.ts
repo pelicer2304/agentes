@@ -269,10 +269,14 @@ export class AppConfigService {
     return typeof value === 'number' ? value : 5;
   }
 
-  /** Piso do Inferred_Deferral, em horas (R11.3). Sem teto. */
+  /**
+   * Piso do Inferred_Deferral, em horas (R11.3). Sem teto. Default ~5min
+   * (0.0833h) para respeitar prazos curtos pedidos pelo cliente ("me chama daqui
+   * 5 minutos"); ajustável via env se quiser evitar follow-ups muito rápidos.
+   */
   get followUpMinDeferralHours(): number {
     const value = this.configService.get<number>('FOLLOWUP_MIN_DEFERRAL_HOURS');
-    return typeof value === 'number' ? value : 1;
+    return typeof value === 'number' ? value : 0.0833;
   }
 
   /** Timeout (em ms) da classificação de engajamento no turno (R10.9). */
