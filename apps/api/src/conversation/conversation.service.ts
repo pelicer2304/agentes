@@ -327,10 +327,9 @@ export class ConversationService {
     // reaches the handoff path nor marks finalHandoff. It produces a
     // deterministic reply and delegates the scheduling side effect to the
     // FollowUpService, short-circuiting steps 8/9 entirely.
-    if (
-      engagement.classification.intent === 'nao_agora' ||
-      engagement.classification.intent === 'opt_out'
-    ) {
+    // Opt-out é PERMANENTE (regra do negócio): um pedido explícito de parar
+    // confirma e desliga o follow-up — e segue valendo mesmo se for repetido.
+    if (engagement.classification.intent === 'opt_out') {
       return this.finishDisengagementTurn(
         conversationId,
         conversation,
@@ -339,18 +338,25 @@ export class ConversationService {
       );
     }
 
-    // interesse_normal: re-enter the cycle if the conversation was opted-out
-    // (R12.4). resumeFromOptOut is a no-op when there is no opted-out schedule,
-    // so this only fires when relevant. Resilient: never breaks the turn.
-    if (engagement.optedOut) {
-      void this.followUpService
-        .resumeFromOptOut(conversationId, new Date())
-        .catch((err) =>
-          this.logger.error(
-            `[${conversationId}] Follow-up resumeFromOptOut hook failed: ${err instanceof Error ? err.message : 'Unknown'}`,
-          ),
-        );
+    // Adiamento ("me chama segunda/daqui a pouco/semana que vem") só agenda
+    // enquanto o cliente NÃO tiver feito opt-out. Depois do opt-out, NENHUMA
+    // mensagem reativa o follow-up automaticamente — nem um adiamento, nem ruído
+    // como a resposta automática de ausência do WhatsApp do cliente (que vinha
+    // sendo lida como adiamento e ressuscitando o ciclo). O bot continua
+    // respondendo normalmente; apenas não re-agenda nada.
+    if (
+      !engagement.optedOut &&
+      engagement.classification.intent === 'nao_agora'
+    ) {
+      return this.finishDisengagementTurn(
+        conversationId,
+        conversation,
+        facts,
+        engagement.classification,
+      );
     }
+    // (interesse_normal não reativa mais o ciclo após opt-out — o antigo
+    //  resumeFromOptOut automático foi removido de propósito.)
 
     const handoffDecision = this.handoffManager.resolve({
       current: handoffState,
