@@ -196,6 +196,11 @@ export class FollowUpService {
 
     const offset = this.resolveDeferralOffset(offsetHours);
     const nextRunAt = new Date(now.getTime() + offset * 60 * 60 * 1000);
+    // O disparo é controlado pelo nextRunAt (instante exato — preserva minutos).
+    // `deferral_offset_hours` é SmallInt (metadata) e NÃO aceita fração: gravar
+    // um offset fracionário (ex.: 0.03h p/ "2 minutos") fazia o upsert FALHAR e
+    // o schedule nunca era criado. Arredonda só para caber no campo.
+    const offsetHoursStored = Math.round(offset);
     this.logger.log(
       `[${conversationId}] scheduleDeferred: offsetHours(pedido)=${offsetHours} -> offset=${offset}h (~${Math.round(offset * 60)}min), nextRunAt=${nextRunAt.toISOString()}`,
     );
@@ -210,7 +215,7 @@ export class FollowUpService {
         maxSentLevel: 0,
         pendingLevel: 1,
         deferred: true,
-        deferralOffsetHours: offset,
+        deferralOffsetHours: offsetHoursStored,
         nextRunAt,
         level3FiredAt: null,
         deferredAttempts: 0,
@@ -223,7 +228,7 @@ export class FollowUpService {
         maxSentLevel: 0,
         pendingLevel: 1,
         deferred: true,
-        deferralOffsetHours: offset,
+        deferralOffsetHours: offsetHoursStored,
         nextRunAt,
         level3FiredAt: null,
         deferredAttempts: 0,

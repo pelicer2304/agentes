@@ -507,7 +507,10 @@ describe('FollowUpService — adiamento e opt-out (fakes em memória)', () => {
           await service.scheduleDeferred(CONV_ID, offset, t);
 
           const after = prisma.__getScheduleByConversation(CONV_ID)!;
-          expect(after.deferralOffsetHours).toBe(expected);
+          // `deferral_offset_hours` é SmallInt (metadata): gravado arredondado
+          // para caber. O nextRunAt abaixo preserva o offset fracionário (é ele
+          // que controla o disparo — inclusive prazos em minutos).
+          expect(after.deferralOffsetHours).toBe(Math.round(expected));
           // Espelha o arredondamento do construtor Date (trunca frações de ms).
           const expectedMs = new Date(
             t.getTime() + expected * MS_PER_HOUR,
