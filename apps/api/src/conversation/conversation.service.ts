@@ -377,22 +377,24 @@ export class ConversationService {
       );
     }
 
-    // Adiamento ("me chama segunda/daqui a pouco/semana que vem") só agenda
-    // enquanto o cliente NÃO tiver feito opt-out. Depois do opt-out, NENHUMA
-    // mensagem reativa o follow-up automaticamente — nem um adiamento, nem ruído
-    // como a resposta automática de ausência do WhatsApp do cliente (que vinha
-    // sendo lida como adiamento e ressuscitando o ciclo). O bot continua
-    // respondendo normalmente; apenas não re-agenda nada.
-    if (
-      !engagement.optedOut &&
-      engagement.classification.intent === 'nao_agora'
-    ) {
-      return this.finishDisengagementTurn(
-        conversationId,
-        conversation,
-        facts,
-        engagement.classification,
-      );
+    // Adiamento. Se o cliente NÃO está em opt-out, qualquer "me chama depois"
+    // agenda. Se JÁ está em opt-out, só um PEDIDO EXPLÍCITO de callback ("me
+    // chama daqui 5 min / segunda") reativa — sinal claro de que mudou de ideia.
+    // Assim respeitamos o opt-out contra ruído (ex.: a resposta automática de
+    // ausência do WhatsApp dele, que não pede nada), mas atendemos o pedido real.
+    if (engagement.classification.intent === 'nao_agora') {
+      const explicitCallback =
+        /\bme\s+(chama|chame|liga|ligue|manda|procur)|pode\s+me\s+(chamar|ligar|mandar)|volta\s+(depois|aqui|amanh)/.test(
+          rawContent.toLowerCase(),
+        );
+      if (!engagement.optedOut || explicitCallback) {
+        return this.finishDisengagementTurn(
+          conversationId,
+          conversation,
+          facts,
+          engagement.classification,
+        );
+      }
     }
     // (interesse_normal não reativa mais o ciclo após opt-out — o antigo
     //  resumeFromOptOut automático foi removido de propósito.)
