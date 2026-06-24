@@ -31,6 +31,47 @@ export class HealthService {
   }
 
   /**
+   * Diagnóstico TEMPORÁRIO do follow-up: estado dos agendamentos recentes e
+   * quantos o scheduler "pegaria" agora (mesma condição do claim, só leitura).
+   * Sem dados sensíveis (telefone/conteúdo). Remover quando o bug fechar.
+   */
+  async followUpDebug(): Promise<unknown> {
+    const now = new Date();
+    const recentSchedules = await this.prisma.followUpSchedule.findMany({
+      orderBy: { updatedAt: 'desc' },
+      take: 5,
+      select: {
+        conversationId: true,
+        cycleState: true,
+        deferred: true,
+        pendingLevel: true,
+        maxSentLevel: true,
+        nextRunAt: true,
+        lockedUntil: true,
+        deferralOffsetHours: true,
+        lastError: true,
+        level3FiredAt: true,
+        updatedAt: true,
+      },
+    });
+    // Mesma condição do claim do scheduler, porém só SELECT (não trava nada).
+    const due = await this.prisma.followUpSchedule.findMany({
+      where: {
+        cycleState: 'active',
+        nextRunAt: { not: null, lte: now },
+        OR: [{ lockedUntil: null }, { lockedUntil: { lte: now } }],
+      },
+      select: { conversationId: true, nextRunAt: true, pendingLevel: true },
+    });
+    return {
+      now: now.toISOString(),
+      dueCountViaPrisma: due.length,
+      due,
+      recentSchedules,
+    };
+  }
+
+  /**
    * Probes the database with a lightweight `SELECT 1`. Never throws; failures
    * are reported as `unhealthy` so the endpoint can still respond.
    */

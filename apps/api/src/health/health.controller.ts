@@ -13,4 +13,10 @@ export class HealthController {
   async check(): Promise<HealthResult> {
     return this.healthService.check();
   }
+
+  /** Diagnóstico TEMPORÁRIO do follow-up (sem auth, sem dados sensíveis). */
+  @Get('followup')
+  async followUp(): Promise<unknown> {
+    return this.healthService.followUpDebug();
+  }
 }
