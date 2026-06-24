@@ -69,6 +69,10 @@ const REPLY_FRUSTRATION =
 const LABEL_DECODER_PHONE = '+55 11 93318-3820';
 const REPLY_REDIRECT_LABELS =
   `Ah, saquei! O decodificador de etiquetas (ZPL pra PDF) é com outro time da Decodifica — aqui é o agente de IA de atendimento. Pra fazer ou renovar sua assinatura, chama nesse número: ${LABEL_DECODER_PHONE}, que eles te resolvem rapidinho.`;
+// Quando é AMBÍGUO (fala de conta/senha/plano, mas sem dizer que é etiqueta), o
+// agente pergunta — já adiantando o número, pra não travar a pessoa.
+const REPLY_MAYBE_LABELS =
+  `Deixa eu te direcionar certo: você tá falando do nosso decodificador de etiquetas (ZPL pra PDF)? Se for, o time de planos te atende no ${LABEL_DECODER_PHONE}. Se for outra coisa, me conta o que você precisa que eu te ajudo por aqui.`;
 
 const REPLY_ACKNOWLEDGMENT = 'Tô por aqui se precisar.';
 
@@ -267,6 +271,16 @@ export class ConversationService {
       return this.finishCannedTurn(
         conversationId,
         REPLY_REDIRECT_LABELS,
+        conversation,
+      );
+    }
+    // Ambíguo (conta/senha/renovar plano, mas sem dizer que é etiqueta): em vez
+    // da resposta seca "não consigo ajudar", PERGUNTA se é o decodificador de
+    // etiquetas e já adianta o número.
+    if (!alreadyRedirected && this.looksLikeSubscriptionOrAccount(userTexts)) {
+      return this.finishCannedTurn(
+        conversationId,
+        REPLY_MAYBE_LABELS,
         conversation,
       );
     }
@@ -966,6 +980,28 @@ export class ConversationService {
         t,
       );
     return labelDomain && buyIntent;
+  }
+
+  /**
+   * Sinais AMBÍGUOS de que a pessoa é cliente de um produto com conta/assinatura
+   * (alterar senha, renovar plano, "minha conta/assinatura/login") SEM citar
+   * etiqueta/ZPL. O agente de IA é sob medida (não tem login/senha/assinatura),
+   * então isso normalmente é o decodificador — mas como não está explícito, o
+   * agente PERGUNTA em vez de redirecionar direto.
+   */
+  private looksLikeSubscriptionOrAccount(text: string): boolean {
+    const t = text.toLowerCase();
+    return (
+      /(alterar|trocar|mudar|recuperar|esqueci|redefinir)\s+(a\s+)?(minha\s+)?senha/.test(
+        t,
+      ) ||
+      /renovar\s+(o\s+|a\s+)?(meu\s+|minha\s+)?(plano|assinatura|mensalidade)/.test(
+        t,
+      ) ||
+      /\b(minha\s+assinatura|minha\s+conta|meu\s+login)\b/.test(t) ||
+      /(fazer|n[ãa]o\s+consigo)\s+(o\s+)?(login|logar|entrar|acessar)/.test(t) ||
+      /(plano|assinatura)\s+(venceu|expirou|vencid|expirad)/.test(t)
+    );
   }
 
   /**
