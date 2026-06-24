@@ -264,6 +264,9 @@ export class FollowUpService {
 
     const level = schedule.pendingLevel as FollowUpLevel;
     const { conversationId, leadId } = schedule;
+    this.logger.log(
+      `[${conversationId}] Follow-up DUE | level=${level} deferred=${schedule.deferred} nextRunAt=${schedule.nextRunAt?.toISOString() ?? 'null'}`,
+    );
     // Deriva o opt-out do estado do ciclo antes da reavaliação. Na prática o
     // schedule aqui está sempre `active` (guarda acima), mas mantemos a
     // derivação a partir do cycleState para coerência com o snapshot (R12.2).
@@ -311,6 +314,9 @@ export class FollowUpService {
 
     // 2. Não elegível: suprime envio, marca cancelado e registra (R2.2/2.4, R4.3).
     if (!result.eligible) {
+      this.logger.warn(
+        `[${conversationId}] Follow-up CANCELADO (inelegivel: ${result.reason}) | leadStatus=${lead.status} botPaused=${conversation.botPaused} assignedTo=${conversation.assignedTo ?? 'null'} handoffAccepted=${conversation.handoffAccepted} stage=${conversation.stage}`,
+      );
       try {
         await this.prisma.followUpSchedule.update({
           where: { id: scheduleId },
@@ -357,14 +363,23 @@ export class FollowUpService {
       conversationId,
       content: message.content,
       now,
+      // Adiamento pedido pelo cliente ("me chama daqui X") fura a janela
+      // comercial — foi ele que marcou a hora. Follow-up automático respeita.
+      bypassWindow: schedule.deferred,
     });
 
     if (outcome.status === 'deferred') {
+      this.logger.warn(
+        `[${conversationId}] Follow-up ADIADO no envio: ${outcome.reason}`,
+      );
       await this.handleDeferred(schedule, level, outcome.reason, now);
       return;
     }
 
     if (outcome.status === 'failed') {
+      this.logger.error(
+        `[${conversationId}] Follow-up FALHOU no envio (Evolution): ${outcome.reason}`,
+      );
       // R9.4 — falha do Evolution: não marca enviado, mantém pendente.
       await this.recorder.record({
         type: FOLLOW_UP_EVENT_TYPES.ERROR,
@@ -379,6 +394,7 @@ export class FollowUpService {
     }
 
     // outcome.status === 'sent'
+    this.logger.log(`[${conversationId}] Follow-up ENVIADO | level=${level}`);
     await this.handleSent(schedule, level, outcome.sentAt);
   }
 

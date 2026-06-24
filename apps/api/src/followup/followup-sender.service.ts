@@ -75,11 +75,16 @@ export class FollowUpSender {
     conversationId: string;
     content: string;
     now: Date;
+    bypassWindow?: boolean;
   }): Promise<SendOutcome> {
-    const { phone, instanceName, conversationId, content, now } = params;
+    const { phone, instanceName, conversationId, content, now, bypassWindow } =
+      params;
 
-    // R9.2 — fora da janela permitida: adia sem marcar enviado.
-    if (!this.isWithinSendWindow(now)) {
+    // R9.2 — fora da janela permitida: adia sem marcar enviado. Exceção: quando
+    // o próprio cliente marcou o horário (adiamento pedido — bypassWindow), o
+    // disparo honra o compromisso e fura a janela comercial; a janela só vale
+    // pro follow-up automático (1h/1d/2d), pra não incomodar fora de hora.
+    if (!bypassWindow && !this.isWithinSendWindow(now)) {
       return { status: 'deferred', reason: 'out_of_window' };
     }
 

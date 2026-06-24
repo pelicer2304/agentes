@@ -276,7 +276,7 @@ export class AppConfigService {
    */
   get followUpMinDeferralHours(): number {
     const value = this.configService.get<number>('FOLLOWUP_MIN_DEFERRAL_HOURS');
-    return typeof value === 'number' ? value : 0.0833;
+    return typeof value === 'number' ? value : 0.0166;
   }
 
   /** Timeout (em ms) da classificação de engajamento no turno (R10.9). */

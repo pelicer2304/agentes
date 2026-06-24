@@ -206,7 +206,7 @@ export const configValidationSchema = Joi.object({
 
   // Piso do Inferred_Deferral, em horas (R11.3). Sem teto. Aceita frações para
   // respeitar prazos curtos pedidos ("me chama daqui 5 min" = 0.0833h).
-  FOLLOWUP_MIN_DEFERRAL_HOURS: Joi.number().min(0.0166).default(0.0833).messages({
+  FOLLOWUP_MIN_DEFERRAL_HOURS: Joi.number().min(0.0166).default(0.0166).messages({
     'number.base': 'FOLLOWUP_MIN_DEFERRAL_HOURS must be a number of hours.',
     'number.min': 'FOLLOWUP_MIN_DEFERRAL_HOURS must be at least 0.0166 hour (~1 min).',
   }),

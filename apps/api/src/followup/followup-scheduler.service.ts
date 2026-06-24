@@ -151,6 +151,12 @@ export class FollowUpSchedulerService implements OnModuleInit, OnModuleDestroy {
   private async processDueSchedules(now: Date): Promise<void> {
     const claimed = await this.claimDueSchedules(now);
 
+    if (claimed.length > 0) {
+      this.logger.log(
+        `Follow-up tick: ${claimed.length} schedule(s) vencido(s) reivindicado(s) para disparo.`,
+      );
+    }
+
     for (const { id } of claimed) {
       try {
         await this.followUpService.processDue(id, now);
